@@ -44,7 +44,10 @@ class Proxy
 		$data = @file_get_contents('php://input');
 		$header = getallheaders();
 
-		return new self($url, $method, $data, $header);
+		$proxy = new self($url, $method, $data, $header);
+		$proxy->removeHeader('host');
+
+		return $proxy;
 	}
 
 	public function setUrl(string $url): self
@@ -258,4 +261,10 @@ class Proxy
 
 		return $header;
 	}
+}
+
+// allow standalone usage
+if (get_included_files()[0] === __FILE__) {
+
+	Proxy::createFromGlobals()->execute();
 }
