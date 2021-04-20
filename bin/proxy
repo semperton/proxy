@@ -1,0 +1,16 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use Semperton\Proxy\Proxy;
+
+if (php_sapi_name() !== 'cli') {
+	return;
+}
+
+require __DIR__ . '/../src/Proxy.php';
+
+$proxy = new Proxy();
+$proxy->setUrl($argv[1]);
+$proxy->execute();
