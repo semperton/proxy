@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Semperton\Proxy;
 
+use InvalidArgumentException;
+
 class Proxy
 {
 	/** @var string */
@@ -16,7 +18,9 @@ class Proxy
 	protected $data = '';
 
 	/** @var array<string, string> */
-	protected $header = [];
+	protected $header = [
+		'user-agent' => 'SempertonProxy/1.0.0 (+https://github.com/semperton/proxy)'
+	];
 
 	/** @var array<string, string> */
 	protected $responseHeader = [];
@@ -27,6 +31,9 @@ class Proxy
 	/** @var bool */
 	protected $isHttp2 = false;
 
+	/**
+	 * @param array<string, string> $header
+	 */
 	public function __construct(string $url = '', string $method = 'GET', string $data = '', array $header = [])
 	{
 		$this->setUrl($url);
@@ -34,11 +41,20 @@ class Proxy
 		$this->setData($data);
 		$this->setHeader($header);
 
-		$this->isHttp2 = isset($_SERVER['SERVER_PROTOCOL']) && stripos($_SERVER['SERVER_PROTOCOL'], 'http/2') !== false;
+		if (
+			php_sapi_name() === 'cli' ||
+			(isset($_SERVER['SERVER_PROTOCOL']) && stripos($_SERVER['SERVER_PROTOCOL'], 'http/2') !== false)
+		) {
+			$this->isHttp2 = true;
+		}
 	}
 
 	public static function createFromGlobals(): Proxy
 	{
+		if (php_sapi_name() === 'cli') {
+			return new self();
+		}
+
 		$url = substr($_SERVER['REQUEST_URI'], strlen($_SERVER['SCRIPT_NAME']) + 1);
 		$method = $_SERVER['REQUEST_METHOD'];
 		$data = @file_get_contents('php://input');
@@ -66,10 +82,11 @@ class Proxy
 	{
 		$method = strtoupper($method);
 
-		if (in_array($method, ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])) {
-
-			$this->method = strtoupper($method);
+		if (!in_array($method, ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])) {
+			throw new InvalidArgumentException("Method < $method > is not supported");
 		}
+
+		$this->method = $method;
 
 		return $this;
 	}
@@ -91,6 +108,9 @@ class Proxy
 		return $this->data;
 	}
 
+	/**
+	 * @param array<string, string> $header
+	 */
 	public function setHeader(array $header): self
 	{
 		foreach ($header as $key => $val) {
@@ -110,13 +130,16 @@ class Proxy
 		return isset($this->header[$name]) ? $this->header[$name] : null;
 	}
 
+	/**
+	 * @return array<string, string>
+	 */
 	public function getAllHeaders(): array
 	{
 		return $this->header;
 	}
 
 	/**
-	 * @param string|array $header
+	 * @param string|string[] $header
 	 */
 	public function removeHeader($header): self
 	{
@@ -184,9 +207,9 @@ class Proxy
 			if (!$this->isHttp2) {
 
 				echo "0\r\n\r\n";
+				flush();
 			}
 
-			flush();
 			die();
 		}
 
@@ -212,7 +235,6 @@ class Proxy
 		}
 
 		flush();
-
 		return $length;
 	}
 
