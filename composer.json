@@ -8,11 +8,15 @@
 			"Semperton\\Proxy\\": "src/"
 		}
 	},
-	"scripts": {
-		"test": "phpunit tests"
+	"require": {
+		"php": ">=7.1",
+		"ext-curl": "*"
 	},
 	"require-dev": {
 		"phpunit/phpunit": "^9.5",
 		"vimeo/psalm": "^4.7"
+	},
+	"scripts": {
+		"test": "phpunit tests"
 	}
 }
