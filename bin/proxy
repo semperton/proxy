@@ -12,5 +12,9 @@ if (php_sapi_name() !== 'cli') {
 require __DIR__ . '/../src/Proxy.php';
 
 $proxy = new Proxy();
-$proxy->setUrl($argv[1]);
-$proxy->execute();
+
+if (isset($argv[1])) {
+	$proxy->setUrl($argv[1]);
+}
+
+$proxy->execute(true);

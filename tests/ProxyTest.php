@@ -10,7 +10,7 @@ final class ProxyTest extends TestCase
 	public function testHttp(): void
 	{
 		$proxy = new Proxy('http://httpbin.org/get');
-		$response = $proxy->execute(true);
+		$response = $proxy->execute();
 
 		$this->assertEquals('HTTP', $response['info']['scheme']);
 	}
@@ -18,7 +18,7 @@ final class ProxyTest extends TestCase
 	public function testHttps(): void
 	{
 		$proxy = new Proxy('https://httpbin.org/get');
-		$response = $proxy->execute(true);
+		$response = $proxy->execute();
 
 		$this->assertEquals('HTTPS', $response['info']['scheme']);
 	}
@@ -26,7 +26,7 @@ final class ProxyTest extends TestCase
 	public function testEncoding(): void
 	{
 		$proxy = new Proxy('https://httpbin.org/gzip');
-		$response = $proxy->execute(true);
+		$response = $proxy->execute();
 
 		$this->assertEquals('gzip', $response['header']['content-encoding']);
 

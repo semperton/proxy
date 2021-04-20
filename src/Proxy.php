@@ -15,53 +15,55 @@ class Proxy
 	protected $method = 'GET';
 
 	/** @var string */
-	protected $data = '';
+	protected $body = '';
 
 	/** @var array<string, string> */
-	protected $header = [
+	protected $headers = [
 		'user-agent' => 'SempertonProxy/1.0.0 (+https://github.com/semperton/proxy)'
 	];
 
 	/** @var array<string, string> */
-	protected $responseHeader = [];
+	protected $responseHeaders = [];
 
 	/** @var bool */
-	protected $return = false;
+	protected $echo = false;
 
 	/** @var bool */
-	protected $isHttp2 = false;
+	protected $isHttp1 = false;
 
 	/**
-	 * @param array<string, string> $header
+	 * @param array<string, string> $headers
 	 */
-	public function __construct(string $url = '', string $method = 'GET', string $data = '', array $header = [])
+	public function __construct(string $url = '', string $method = 'GET', string $body = '', array $headers = [])
 	{
 		$this->setUrl($url);
 		$this->setMethod($method);
-		$this->setData($data);
-		$this->setHeader($header);
+		$this->setBody($body);
+		$this->setHeaders($headers);
 
-		if (
-			php_sapi_name() === 'cli' ||
-			(isset($_SERVER['SERVER_PROTOCOL']) && stripos($_SERVER['SERVER_PROTOCOL'], 'http/2') !== false)
-		) {
-			$this->isHttp2 = true;
-		}
+		$this->isHttp1 = self::getServerHttpVersion() === 1;
 	}
 
 	public static function createFromGlobals(): Proxy
 	{
-		if (php_sapi_name() === 'cli') {
-			return new self();
+		$proxy = new self();
+
+		if (isset($_SERVER['REQUEST_METHOD'])) {
+			$proxy->setMethod((string)$_SERVER['REQUEST_METHOD']);
 		}
 
-		$url = substr($_SERVER['REQUEST_URI'], strlen($_SERVER['SCRIPT_NAME']) + 1);
-		$method = $_SERVER['REQUEST_METHOD'];
-		$data = @file_get_contents('php://input');
-		$header = getallheaders();
+		if (in_array($proxy->getMethod(), ['POST', 'PUT', 'PATCH'])) {
+			$data = file_get_contents('php://input');
+			$proxy->setBody($data);
+		}
 
-		$proxy = new self($url, $method, $data, $header);
-		$proxy->removeHeader('host');
+		$headers = function_exists('getallheaders') ? getallheaders() : self::getServerHeaders();
+		$proxy->setHeaders($headers);
+
+		if (isset($_SERVER['REQUEST_URI'], $_SERVER['SCRIPT_NAME'])) {
+			$url = substr((string)$_SERVER['REQUEST_URI'], strlen((string)$_SERVER['SCRIPT_NAME']) + 1);
+			$proxy->setUrl($url)->removeHeader('host');
+		}
 
 		return $proxy;
 	}
@@ -96,28 +98,28 @@ class Proxy
 		return $this->method;
 	}
 
-	public function setData(string $data): self
+	public function setBody(string $data): self
 	{
-		$this->data = $data;
+		$this->body = $data;
 
 		return $this;
 	}
 
-	public function getData(): string
+	public function getBody(): string
 	{
-		return $this->data;
+		return $this->body;
 	}
 
 	/**
-	 * @param array<string, string> $header
+	 * @param array<string, string> $headers
 	 */
-	public function setHeader(array $header): self
+	public function setHeaders(array $headers): self
 	{
-		foreach ($header as $key => $val) {
+		foreach ($headers as $key => $val) {
 
 			$key = strtolower($key);
 
-			$this->header[$key] = $val;
+			$this->headers[$key] = $val;
 		}
 
 		return $this;
@@ -127,7 +129,7 @@ class Proxy
 	{
 		$name = strtolower($name);
 
-		return isset($this->header[$name]) ? $this->header[$name] : null;
+		return isset($this->headers[$name]) ? $this->headers[$name] : null;
 	}
 
 	/**
@@ -135,7 +137,7 @@ class Proxy
 	 */
 	public function getAllHeaders(): array
 	{
-		return $this->header;
+		return $this->headers;
 	}
 
 	/**
@@ -152,7 +154,7 @@ class Proxy
 
 			$key = strtolower($key);
 
-			unset($this->header[$key]);
+			unset($this->headers[$key]);
 		}
 
 		return $this;
@@ -161,18 +163,17 @@ class Proxy
 	/**
 	 * @return array|void
 	 */
-	public function execute(bool $return = false)
+	public function execute(bool $echo = false)
 	{
-		$this->return = $return;
-		$this->responseHeader = [];
+		$this->echo = $echo;
+		$this->responseHeaders = [];
 
 		$ch = curl_init($this->url);
 
 		curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $this->method);
 
 		if (in_array($this->method, ['POST', 'PUT', 'PATCH'])) {
-
-			curl_setopt($ch, CURLOPT_POSTFIELDS, $this->data);
+			curl_setopt($ch, CURLOPT_POSTFIELDS, $this->body);
 		}
 
 		curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0);
@@ -187,12 +188,11 @@ class Proxy
 
 		curl_setopt($ch, CURLOPT_HEADERFUNCTION, [$this, 'onCurlHeader']);
 
-		if (!$this->return) {
+		if ($this->echo) {
 
 			curl_setopt($ch, CURLOPT_WRITEFUNCTION, [$this, 'onCurlWrite']);
 
-			if (!$this->isHttp2) {
-
+			if ($this->isHttp1) {
 				header('Transfer-Encoding: chunked');
 			}
 		}
@@ -202,21 +202,15 @@ class Proxy
 
 		curl_close($ch);
 
-		if (!$this->return) {
-
-			if (!$this->isHttp2) {
-
-				echo "0\r\n\r\n";
-				flush();
-			}
-
-			die();
+		if ($this->echo && $this->isHttp1) {
+			echo "0\r\n\r\n";
+			flush();
 		}
 
 		return [
 
 			'info' => $responseInfo,
-			'header' => $this->responseHeader,
+			'header' => $this->responseHeaders,
 			'body' => $responseBody
 		];
 	}
@@ -228,10 +222,10 @@ class Proxy
 	{
 		$length = strlen($data);
 
-		if ($this->isHttp2) {
-			echo $data;
-		} else {
+		if ($this->isHttp1) {
 			echo dechex($length) . "\r\n$data\r\n";
+		} else {
+			echo $data;
 		}
 
 		flush();
@@ -246,11 +240,12 @@ class Proxy
 		// we follow redirects, so we need to reset the headers...
 		if (stripos($header, 'http') === 0) {
 
-			$this->responseHeader = [];
+			$this->responseHeaders = [];
 		} else {
 
-			if ($this->return) {
-
+			if ($this->echo) {
+				header($header);
+			} else {
 				$col = strpos($header, ':');
 
 				if ($col) { // not false and > 0
@@ -258,11 +253,8 @@ class Proxy
 					$key = strtolower(substr($header, 0, $col));
 					$val = substr($header, $col + 1);
 
-					$this->responseHeader[trim($key)] = trim($val);
+					$this->responseHeaders[trim($key)] = trim($val);
 				}
-			} else {
-
-				header($header);
 			}
 		}
 
@@ -276,17 +268,67 @@ class Proxy
 	{
 		$header = [];
 
-		foreach ($this->header as $key => $val) {
+		foreach ($this->headers as $key => $val) {
 
 			$header[] = $key . ':' . $val;
 		}
 
 		return $header;
 	}
+
+	protected static function getServerHttpVersion(): int
+	{
+		if (isset($_SERVER['SERVER_PROTOCOL'])) {
+
+			$proto = (string)$_SERVER['SERVER_PROTOCOL'];
+			$pos = stripos($proto, 'http/');
+
+			if ($pos !== false) {
+				return (int)substr($proto, $pos + 1, 1);
+			}
+		}
+
+		return 0;
+	}
+
+	/**
+	 * laminas-diactoros/src/functions/marshal_headers_from_sapi.php
+	 * @return array<string, string>
+	 */
+	protected static function getServerHeaders(): array
+	{
+		$headers = [];
+		foreach ($_SERVER as $key => $value) {
+
+			$key = (string)$key;
+
+			if (0 === strpos($key, 'REDIRECT_')) {
+				$key = substr($key, 9);
+
+				if (array_key_exists($key, $_SERVER)) {
+					continue;
+				}
+			}
+
+			if ($value && 0 === strpos($key, 'HTTP_')) {
+				$name = strtr(strtolower(substr($key, 5)), '_', '-');
+				$headers[$name] = (string)$value;
+				continue;
+			}
+
+			if ($value && 0 === strpos($key, 'CONTENT_')) {
+				$name = 'content-' . strtolower(substr($key, 8));
+				$headers[$name] = (string)$value;
+				continue;
+			}
+		}
+
+		return $headers;
+	}
 }
 
 // allow standalone usage
 if (get_included_files()[0] === __FILE__) {
 
-	Proxy::createFromGlobals()->execute();
+	Proxy::createFromGlobals()->execute(true);
 }
