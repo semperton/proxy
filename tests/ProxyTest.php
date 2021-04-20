@@ -7,30 +7,22 @@ use Semperton\Proxy\Proxy;
 
 final class ProxyTest extends TestCase
 {
-	public function testHttp(): void
-	{
-		$proxy = new Proxy('http://httpbin.org/get');
-		$response = $proxy->execute();
-
-		$this->assertEquals('HTTP', $response['info']['scheme']);
-	}
-
-	public function testHttps(): void
+	public function testResponseCode(): void
 	{
 		$proxy = new Proxy('https://httpbin.org/get');
-		$response = $proxy->execute();
+		$proxy->execute();
 
-		$this->assertEquals('HTTPS', $response['info']['scheme']);
+		$this->assertEquals(200, $proxy->getResponseCode());
 	}
 
 	public function testEncoding(): void
 	{
 		$proxy = new Proxy('https://httpbin.org/gzip');
-		$response = $proxy->execute();
+		$proxy->execute();
 
-		$this->assertEquals('gzip', $response['header']['content-encoding']);
+		$this->assertEquals('gzip', $proxy->getResponseHeader('content-encoding'));
 
-		$body = gzdecode($response['body']);
+		$body = gzdecode($proxy->getResponseBody());
 		$data = json_decode($body, true);
 
 		$this->assertTrue($data['gzipped']);

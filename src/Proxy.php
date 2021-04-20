@@ -18,18 +18,30 @@ class Proxy
 	protected $body = '';
 
 	/** @var array<string, string> */
-	protected $headers = [
+	protected $requestHeaders = [
 		'user-agent' => 'SempertonProxy/1.0.0 (+https://github.com/semperton/proxy)'
 	];
+
+	/** @var string */
+	protected $responseBody = '';
 
 	/** @var array<string, string> */
 	protected $responseHeaders = [];
 
+	/** @var int */
+	protected $responseCode = 0;
+
 	/** @var bool */
-	protected $echo = false;
+	protected $followRedirect = true;
+
+	/** @var bool */
+	protected $emit = false;
 
 	/** @var bool */
 	protected $isHttp1 = false;
+
+	/** @var null|resource */
+	protected $curlHandle = null;
 
 	/**
 	 * @param array<string, string> $headers
@@ -39,9 +51,16 @@ class Proxy
 		$this->setUrl($url);
 		$this->setMethod($method);
 		$this->setBody($body);
-		$this->setHeaders($headers);
+		$this->addRequestHeaders($headers);
 
 		$this->isHttp1 = self::getServerHttpVersion() === 1;
+	}
+
+	public function __destruct()
+	{
+		if (is_resource($this->curlHandle)) {
+			curl_close($this->curlHandle);
+		}
 	}
 
 	public static function createFromGlobals(): Proxy
@@ -58,11 +77,11 @@ class Proxy
 		}
 
 		$headers = function_exists('getallheaders') ? getallheaders() : self::getServerHeaders();
-		$proxy->setHeaders($headers);
+		$proxy->addRequestHeaders($headers);
 
 		if (isset($_SERVER['REQUEST_URI'], $_SERVER['SCRIPT_NAME'])) {
 			$url = substr((string)$_SERVER['REQUEST_URI'], strlen((string)$_SERVER['SCRIPT_NAME']) + 1);
-			$proxy->setUrl($url)->removeHeader('host');
+			$proxy->setUrl($url)->removeRequestHeader('host');
 		}
 
 		return $proxy;
@@ -113,106 +132,140 @@ class Proxy
 	/**
 	 * @param array<string, string> $headers
 	 */
-	public function setHeaders(array $headers): self
+	public function addRequestHeaders(array $headers): self
 	{
 		foreach ($headers as $key => $val) {
 
 			$key = strtolower($key);
-
-			$this->headers[$key] = $val;
+			$this->requestHeaders[$key] = $val;
 		}
 
 		return $this;
 	}
 
-	public function getHeader(string $name): ?string
+	public function getRequestHeader(string $name): ?string
 	{
 		$name = strtolower($name);
 
-		return isset($this->headers[$name]) ? $this->headers[$name] : null;
+		return isset($this->requestHeaders[$name]) ? $this->requestHeaders[$name] : null;
 	}
 
 	/**
 	 * @return array<string, string>
 	 */
-	public function getAllHeaders(): array
+	public function getAllRequestHeaders(): array
 	{
-		return $this->headers;
+		return $this->requestHeaders;
 	}
 
 	/**
 	 * @param string|string[] $header
 	 */
-	public function removeHeader($header): self
+	public function removeRequestHeader($header): self
 	{
 		if (!is_array($header)) {
-
 			$header = [$header];
 		}
 
 		foreach ($header as $key) {
 
 			$key = strtolower($key);
-
-			unset($this->headers[$key]);
+			unset($this->requestHeaders[$key]);
 		}
 
 		return $this;
 	}
 
-	/**
-	 * @return array|void
-	 */
-	public function execute(bool $echo = false)
+	public function followRedirect(bool $flag): self
 	{
-		$this->echo = $echo;
+		$this->followRedirect = $flag;
+		return $this;
+	}
+
+	public function getResponseHeader(string $name): ?string
+	{
+		$name = strtolower($name);
+
+		return $this->responseHeaders[$name] ?? null;
+	}
+
+	public function getAllResponseHeaders(): array
+	{
+		return $this->responseHeaders;
+	}
+
+	public function getResponseBody(): string
+	{
+		return $this->responseBody;
+	}
+
+	public function getResponseCode(): int
+	{
+		return $this->responseCode;
+	}
+
+	public function execute(bool $emit = false): bool
+	{
+		$this->emit = $emit;
+		$this->responseBody = '';
 		$this->responseHeaders = [];
+		$this->responseCode = 0;
 
-		$ch = curl_init($this->url);
-
-		curl_setopt($ch, CURLOPT_CUSTOMREQUEST, $this->method);
-
-		if (in_array($this->method, ['POST', 'PUT', 'PATCH'])) {
-			curl_setopt($ch, CURLOPT_POSTFIELDS, $this->body);
+		if (!is_resource($this->curlHandle)) {
+			$this->curlHandle = curl_init();
 		}
 
-		curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, 0);
-		curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 0);
+		curl_reset($this->curlHandle);
+		curl_setopt_array($this->curlHandle, $this->getCurlOptions());
 
-		curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-		curl_setopt($ch, CURLOPT_FOLLOWLOCATION, 1);
+		$success = curl_exec($this->curlHandle);
 
-		curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2_0);
+		$this->responseCode = (int)curl_getinfo($this->curlHandle, CURLINFO_RESPONSE_CODE);
 
-		curl_setopt($ch, CURLOPT_HTTPHEADER, $this->getHeaderArray());
-
-		curl_setopt($ch, CURLOPT_HEADERFUNCTION, [$this, 'onCurlHeader']);
-
-		if ($this->echo) {
-
-			curl_setopt($ch, CURLOPT_WRITEFUNCTION, [$this, 'onCurlWrite']);
-
-			if ($this->isHttp1) {
-				header('Transfer-Encoding: chunked');
-			}
-		}
-
-		$responseBody = curl_exec($ch);
-		$responseInfo = curl_getinfo($ch);
-
-		curl_close($ch);
-
-		if ($this->echo && $this->isHttp1) {
+		if ($this->emit && $this->isHttp1) {
 			echo "0\r\n\r\n";
 			flush();
 		}
 
-		return [
+		return (bool)$success;
+	}
 
-			'info' => $responseInfo,
-			'header' => $this->responseHeaders,
-			'body' => $responseBody
+	protected function getCurlOptions(): array
+	{
+		$options = [
+			CURLOPT_CUSTOMREQUEST => $this->method,
+			CURLOPT_URL => $this->url,
+			CURLOPT_HTTPHEADER => $this->getRequestHeaderArray(),
+
+			CURLOPT_CONNECTTIMEOUT => 100,
+			CURLOPT_TIMEOUT => 100,
+
+			CURLOPT_SSL_VERIFYPEER => false,
+			CURLOPT_SSL_VERIFYHOST => false,
+
+			CURLOPT_RETURNTRANSFER => false,
+			CURLOPT_HEADER => false,
+
+			CURLOPT_HTTP_VERSION => CURL_HTTP_VERSION_2_0,
+
+			CURLOPT_WRITEFUNCTION => [$this, 'onCurlWrite'],
+			CURLOPT_HEADERFUNCTION => [$this, 'onCurlHeader']
 		];
+
+		if ($this->followRedirect) {
+			$options[CURLOPT_FOLLOWLOCATION] = true;
+			// $options[CURLOPT_MAXREDIRS] = 3;
+		}
+
+		if (in_array($this->method, ['POST', 'PUT', 'PATCH'])) {
+			$options[CURLOPT_POSTFIELDS] = $this->body;
+		}
+
+		if ($this->method === 'HEAD') {
+			$options[CURLOPT_NOBODY] = true;
+		}
+
+		return $options;
 	}
 
 	/**
@@ -222,13 +275,28 @@ class Proxy
 	{
 		$length = strlen($data);
 
-		if ($this->isHttp1) {
-			echo dechex($length) . "\r\n$data\r\n";
+		if ($this->emit) {
+
+			if (!headers_sent()) {
+				foreach ($this->responseHeaders as $key => $val) {
+					header("$key: $val", false);
+				}
+				if ($this->isHttp1) {
+					header('Transfer-Encoding: chunked');
+				}
+			}
+
+			if ($this->isHttp1) {
+				echo dechex($length) . "\r\n$data\r\n";
+			} else {
+				echo $data;
+			}
+
+			flush();
 		} else {
-			echo $data;
+			$this->responseBody .= $data;
 		}
 
-		flush();
 		return $length;
 	}
 
@@ -237,43 +305,43 @@ class Proxy
 	 */
 	protected function onCurlHeader($ch, string $header): int
 	{
-		// we follow redirects, so we need to reset the headers...
+		$length = strlen($header);
+		$header = trim($header);
+
 		if (stripos($header, 'http') === 0) {
 
 			$this->responseHeaders = [];
-		} else {
-
-			if ($this->echo) {
-				header($header);
-			} else {
-				$col = strpos($header, ':');
-
-				if ($col) { // not false and > 0
-
-					$key = strtolower(substr($header, 0, $col));
-					$val = substr($header, $col + 1);
-
-					$this->responseHeaders[trim($key)] = trim($val);
-				}
-			}
+			$this->responseBody = '';
+		} else if (!empty($header)) {
+			$this->storeResponseHeader($header);
 		}
 
-		return strlen($header);
+		return $length;
+	}
+
+	protected function storeResponseHeader(string $header): void
+	{
+		$split = explode(':', $header, 2);
+
+		if (isset($split[1])) {
+			$key = strtolower(trim($split[0]));
+			$val = trim($split[1]);
+
+			$this->responseHeaders[$key] = $val;
+		}
 	}
 
 	/**
 	 * @return string[]
 	 */
-	protected function getHeaderArray(): array
+	protected function getRequestHeaderArray(): array
 	{
-		$header = [];
-
-		foreach ($this->headers as $key => $val) {
-
-			$header[] = $key . ':' . $val;
+		$headers = [];
+		foreach ($this->requestHeaders as $key => $val) {
+			$headers[] = "$key: $val";
 		}
 
-		return $header;
+		return $headers;
 	}
 
 	protected static function getServerHttpVersion(): int
