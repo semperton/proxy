@@ -14,7 +14,7 @@ require __DIR__ . '/../src/Proxy.php';
 $proxy = new Proxy();
 
 if (isset($argv[1])) {
-	$proxy->setUrl($argv[1]);
+	$proxy->setRequestUrl($argv[1]);
 }
 
 $proxy->execute(true);

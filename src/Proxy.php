@@ -6,16 +6,16 @@ namespace Semperton\Proxy;
 
 use InvalidArgumentException;
 
-class Proxy
+final class Proxy
 {
 	/** @var string */
-	protected $url = '';
+	protected $requestUrl = '';
 
 	/** @var string */
-	protected $method = 'GET';
+	protected $requestMethod = 'GET';
 
 	/** @var string */
-	protected $body = '';
+	protected $requestBody = '';
 
 	/** @var array<string, string> */
 	protected $requestHeaders = [
@@ -48,10 +48,10 @@ class Proxy
 	 */
 	public function __construct(string $url = '', string $method = 'GET', string $body = '', array $headers = [])
 	{
-		$this->setUrl($url);
-		$this->setMethod($method);
-		$this->setBody($body);
-		$this->addRequestHeaders($headers);
+		$this->setRequestUrl($url);
+		$this->setRequestMethod($method);
+		$this->setRequestBody($body);
+		$this->setRequestHeaders($headers);
 
 		$this->isHttp1 = self::getServerHttpVersion() === 1;
 	}
@@ -68,38 +68,46 @@ class Proxy
 		$proxy = new self();
 
 		if (isset($_SERVER['REQUEST_METHOD'])) {
-			$proxy->setMethod((string)$_SERVER['REQUEST_METHOD']);
+			$proxy->setRequestMethod((string)$_SERVER['REQUEST_METHOD']);
 		}
 
-		if (in_array($proxy->getMethod(), ['POST', 'PUT', 'PATCH'])) {
+		if (in_array($proxy->getRequestMethod(), ['POST', 'PUT', 'PATCH'])) {
 			$data = file_get_contents('php://input');
-			$proxy->setBody($data);
+			$proxy->setRequestBody($data);
 		}
 
 		$headers = function_exists('getallheaders') ? getallheaders() : self::getServerHeaders();
-		$proxy->addRequestHeaders($headers);
+		$proxy->setRequestHeaders($headers);
 
 		if (isset($_SERVER['REQUEST_URI'], $_SERVER['SCRIPT_NAME'])) {
-			$url = substr((string)$_SERVER['REQUEST_URI'], strlen((string)$_SERVER['SCRIPT_NAME']) + 1);
-			$proxy->setUrl($url)->removeRequestHeader('host');
+
+			$uri = (string)$_SERVER['REQUEST_URI'];
+			$script = (string)$_SERVER['SCRIPT_NAME'];
+
+			$pos = strpos($uri, $script);
+
+			if ($pos !== false) {
+				$url = substr($uri, $pos + mb_strlen($script) + 1);
+				$proxy->setRequestUrl($url)->removeRequestHeader('host');
+			}
 		}
 
 		return $proxy;
 	}
 
-	public function setUrl(string $url): self
+	public function setRequestUrl(string $url): self
 	{
-		$this->url = $url;
+		$this->requestUrl = $url;
 
 		return $this;
 	}
 
-	public function getUrl(): string
+	public function geRequesttUrl(): string
 	{
-		return $this->url;
+		return $this->requestUrl;
 	}
 
-	public function setMethod(string $method): self
+	public function setRequestMethod(string $method): self
 	{
 		$method = strtoupper($method);
 
@@ -107,32 +115,32 @@ class Proxy
 			throw new InvalidArgumentException("Method < $method > is not supported");
 		}
 
-		$this->method = $method;
+		$this->requestMethod = $method;
 
 		return $this;
 	}
 
-	public function getMethod(): string
+	public function getRequestMethod(): string
 	{
-		return $this->method;
+		return $this->requestMethod;
 	}
 
-	public function setBody(string $data): self
+	public function setRequestBody(string $data): self
 	{
-		$this->body = $data;
+		$this->responseBody = $data;
 
 		return $this;
 	}
 
-	public function getBody(): string
+	public function getRequestBody(): string
 	{
-		return $this->body;
+		return $this->requestBody;
 	}
 
 	/**
 	 * @param array<string, string> $headers
 	 */
-	public function addRequestHeaders(array $headers): self
+	public function setRequestHeaders(array $headers): self
 	{
 		foreach ($headers as $key => $val) {
 
@@ -176,12 +184,6 @@ class Proxy
 		return $this;
 	}
 
-	public function followRedirect(bool $flag): self
-	{
-		$this->followRedirect = $flag;
-		return $this;
-	}
-
 	public function getResponseHeader(string $name): ?string
 	{
 		$name = strtolower($name);
@@ -202,6 +204,12 @@ class Proxy
 	public function getResponseCode(): int
 	{
 		return $this->responseCode;
+	}
+
+	public function followRedirect(bool $flag): self
+	{
+		$this->followRedirect = $flag;
+		return $this;
 	}
 
 	public function execute(bool $emit = false): bool
@@ -233,8 +241,8 @@ class Proxy
 	protected function getCurlOptions(): array
 	{
 		$options = [
-			CURLOPT_CUSTOMREQUEST => $this->method,
-			CURLOPT_URL => $this->url,
+			CURLOPT_CUSTOMREQUEST => $this->requestMethod,
+			CURLOPT_URL => $this->requestUrl,
 			CURLOPT_HTTPHEADER => $this->getRequestHeaderArray(),
 
 			CURLOPT_CONNECTTIMEOUT => 100,
@@ -257,11 +265,9 @@ class Proxy
 			// $options[CURLOPT_MAXREDIRS] = 3;
 		}
 
-		if (in_array($this->method, ['POST', 'PUT', 'PATCH'])) {
-			$options[CURLOPT_POSTFIELDS] = $this->body;
-		}
-
-		if ($this->method === 'HEAD') {
+		if (in_array($this->requestMethod, ['POST', 'PUT', 'PATCH'])) {
+			$options[CURLOPT_POSTFIELDS] = $this->requestBody;
+		} else if ($this->requestMethod === 'HEAD') {
 			$options[CURLOPT_NOBODY] = true;
 		}
 
@@ -269,9 +275,9 @@ class Proxy
 	}
 
 	/**
-	 * @param resource $ch
+	 * @param resource $handle
 	 */
-	protected function onCurlWrite($ch, string $data): int
+	protected function onCurlWrite($handle, string $data): int
 	{
 		$length = strlen($data);
 
@@ -301,9 +307,9 @@ class Proxy
 	}
 
 	/**
-	 * @param resource $ch
+	 * @param resource $handle
 	 */
-	protected function onCurlHeader($ch, string $header): int
+	protected function onCurlHeader($handle, string $header): int
 	{
 		$length = strlen($header);
 		$header = trim($header);
