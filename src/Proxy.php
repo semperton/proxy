@@ -127,7 +127,7 @@ final class Proxy
 
 	public function setRequestBody(string $data): self
 	{
-		$this->responseBody = $data;
+		$this->requestBody = $data;
 
 		return $this;
 	}
