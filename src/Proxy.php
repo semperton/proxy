@@ -284,6 +284,7 @@ final class Proxy
 		if ($this->emit) {
 
 			if (!headers_sent()) {
+				unset($this->responseHeaders['content-length']);
 				foreach ($this->responseHeaders as $key => $val) {
 					header("$key: $val", false);
 				}
