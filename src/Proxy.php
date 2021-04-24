@@ -228,8 +228,6 @@ final class Proxy
 
 		$success = curl_exec($this->curlHandle);
 
-		$this->responseCode = (int)curl_getinfo($this->curlHandle, CURLINFO_RESPONSE_CODE);
-
 		if ($this->emit && $this->isHttp1) {
 			echo "0\r\n\r\n";
 			flush();
@@ -284,10 +282,15 @@ final class Proxy
 		if ($this->emit) {
 
 			if (!headers_sent()) {
+
+				http_response_code($this->responseCode);
+
 				unset($this->responseHeaders['content-length']);
+
 				foreach ($this->responseHeaders as $key => $val) {
 					header("$key: $val", false);
 				}
+
 				if ($this->isHttp1) {
 					header('Transfer-Encoding: chunked');
 				}
@@ -319,6 +322,9 @@ final class Proxy
 
 			$this->responseHeaders = [];
 			$this->responseBody = '';
+
+			$code = explode(' ', $header, 2);
+			$this->responseCode = isset($code[1]) ? (int)$code[1] : 0;
 		} else if (!empty($header)) {
 			$this->storeResponseHeader($header);
 		}
