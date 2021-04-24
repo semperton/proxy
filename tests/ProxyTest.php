@@ -9,10 +9,20 @@ final class ProxyTest extends TestCase
 {
 	public function testResponseCode(): void
 	{
-		$proxy = new Proxy('https://httpbin.org/get');
+		$proxy = new Proxy('https://httpbin.org/status/200');
 		$proxy->execute();
 
 		$this->assertEquals(200, $proxy->getResponseCode());
+
+		$proxy->setRequestUrl('https://httpbin.org/status/404');
+		$proxy->execute();
+
+		$this->assertEquals(404, $proxy->getResponseCode());
+
+		$proxy->setRequestUrl('https://httpbin.org/status/301');
+		$proxy->followRedirect(false)->execute();
+
+		$this->assertEquals(301, $proxy->getResponseCode());
 	}
 
 	public function testEncoding(): void
