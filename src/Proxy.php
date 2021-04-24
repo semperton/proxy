@@ -87,7 +87,7 @@ final class Proxy
 			$pos = strpos($uri, $script);
 
 			if ($pos !== false) {
-				$url = substr($uri, $pos + mb_strlen($script) + 1);
+				$url = substr($uri, $pos + strlen($script) + 1);
 				$proxy->setRequestUrl($url)->removeRequestHeader('host');
 			}
 		}
