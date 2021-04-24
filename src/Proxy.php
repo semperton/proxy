@@ -76,7 +76,7 @@ final class Proxy
 			$proxy->setRequestBody($data);
 		}
 
-		$headers = function_exists('getallheaders') ? getallheaders() : self::getServerHeaders();
+		$headers = function_exists('getallheaders') ? getallheaders() : self::getallheaders();
 		$proxy->setRequestHeaders($headers);
 
 		if (isset($_SERVER['REQUEST_URI'], $_SERVER['SCRIPT_NAME'])) {
@@ -366,34 +366,40 @@ final class Proxy
 	}
 
 	/**
-	 * laminas-diactoros/src/functions/marshal_headers_from_sapi.php
+	 * https://github.com/ralouphie/getallheaders/blob/develop/src/getallheaders.php
 	 * @return array<string, string>
 	 */
-	protected static function getServerHeaders(): array
+	protected static function getallheaders(): array
 	{
 		$headers = [];
+
+		$copy_server = [
+			'CONTENT_TYPE'   => 'Content-Type',
+			'CONTENT_LENGTH' => 'Content-Length',
+			'CONTENT_MD5'    => 'Content-Md5',
+		];
+
 		foreach ($_SERVER as $key => $value) {
-
 			$key = (string)$key;
-
-			if (0 === strpos($key, 'REDIRECT_')) {
-				$key = substr($key, 9);
-
-				if (array_key_exists($key, $_SERVER)) {
-					continue;
+			if (substr($key, 0, 5) === 'HTTP_') {
+				$key = substr($key, 5);
+				if (!isset($copy_server[$key]) || !isset($_SERVER[$key])) {
+					$key = str_replace(' ', '-', ucwords(strtolower(str_replace('_', ' ', $key))));
+					$headers[$key] = $value;
 				}
+			} elseif (isset($copy_server[$key])) {
+				$headers[$copy_server[$key]] = $value;
 			}
+		}
 
-			if ($value && 0 === strpos($key, 'HTTP_')) {
-				$name = strtr(strtolower(substr($key, 5)), '_', '-');
-				$headers[$name] = (string)$value;
-				continue;
-			}
-
-			if ($value && 0 === strpos($key, 'CONTENT_')) {
-				$name = 'content-' . strtolower(substr($key, 8));
-				$headers[$name] = (string)$value;
-				continue;
+		if (!isset($headers['Authorization'])) {
+			if (isset($_SERVER['REDIRECT_HTTP_AUTHORIZATION'])) {
+				$headers['Authorization'] = $_SERVER['REDIRECT_HTTP_AUTHORIZATION'];
+			} elseif (isset($_SERVER['PHP_AUTH_USER'])) {
+				$basic_pass = isset($_SERVER['PHP_AUTH_PW']) ? $_SERVER['PHP_AUTH_PW'] : '';
+				$headers['Authorization'] = 'Basic ' . base64_encode($_SERVER['PHP_AUTH_USER'] . ':' . $basic_pass);
+			} elseif (isset($_SERVER['PHP_AUTH_DIGEST'])) {
+				$headers['Authorization'] = $_SERVER['PHP_AUTH_DIGEST'];
 			}
 		}
 
