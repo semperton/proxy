@@ -243,8 +243,8 @@ final class Proxy
 			CURLOPT_URL => $this->requestUrl,
 			CURLOPT_HTTPHEADER => $this->getRequestHeaderArray(),
 
-			CURLOPT_CONNECTTIMEOUT => 100,
-			CURLOPT_TIMEOUT => 100,
+			CURLOPT_CONNECTTIMEOUT => 10,
+			CURLOPT_TIMEOUT => 10,
 
 			CURLOPT_SSL_VERIFYPEER => false,
 			CURLOPT_SSL_VERIFYHOST => false,
@@ -292,7 +292,7 @@ final class Proxy
 				}
 
 				if ($this->isHttp1) {
-					header('Transfer-Encoding: chunked');
+					header('transfer-encoding: chunked');
 				}
 			}
 
