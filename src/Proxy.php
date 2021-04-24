@@ -102,7 +102,7 @@ final class Proxy
 		return $this;
 	}
 
-	public function geRequesttUrl(): string
+	public function getRequestUrl(): string
 	{
 		return $this->requestUrl;
 	}
