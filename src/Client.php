@@ -170,6 +170,16 @@ final class Client implements ClientInterface
 	 */
 	protected function writeRequest($socket, RequestInterface $request): void
 	{
+		$size = $request->getBody()->getSize();
+
+		if ($size !== null && $size !== 0 && !$request->hasHeader('Content-Length')) {
+			$request = $request->withHeader('Content-Length', (string)$size);
+		}
+
+		// if ($request->getBody()->isReadable() && !$request->hasHeader('Content-Length')) {
+		// 	$request = $request->withHeader('Transfer-Encoding', 'chunked');
+		// }
+
 		$headers = $this->getRequestHeaders($request);
 
 		if (false === $this->fwrite($socket, $headers)) {
