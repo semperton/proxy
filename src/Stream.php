@@ -39,6 +39,7 @@ final class Stream implements StreamInterface
 
 	public function close(): void
 	{
+		/** @psalm-suppress InvalidPropertyAssignmentValue */
 		fclose($this->socket);
 	}
 
@@ -48,6 +49,7 @@ final class Stream implements StreamInterface
 	public function detach()
 	{
 		$socket = $this->socket;
+		/** @psalm-suppress PossiblyNullPropertyAssignmentValue */
 		$this->socket = null;
 
 		return $socket;

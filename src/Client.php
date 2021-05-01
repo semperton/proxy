@@ -87,7 +87,8 @@ final class Client implements ClientInterface
 
 		if ($request->getUri()->getScheme() === 'https') {
 
-			$sslMethod = $this->contextOptions['ssl']['crypto_method'] ?? STREAM_CRYPTO_METHOD_ANY_CLIENT;
+			$sslMethod = (int)($this->contextOptions['ssl']['crypto_method'] ?? STREAM_CRYPTO_METHOD_ANY_CLIENT);
+			
 			if (false === @stream_socket_enable_crypto($socket, true, $sslMethod)) {
 				$error = error_get_last();
 				throw new NetworkException($request, 'Cannot enable tls: ' . (isset($error) ? $error['message'] : ''));
@@ -265,8 +266,10 @@ final class Client implements ClientInterface
 			return $result;
 		}
 
+		$read = [];
 		$write = [$stream];
-		@stream_select([], $write, [], 0);
+		$except = [];
+		@stream_select($read, $write, $except, 0);
 
 		if (!$write) {
 			return 0;
