@@ -13,16 +13,15 @@ use Psr\Http\Message\StreamInterface;
 use Semperton\Proxy\Exception\NetworkException;
 use Semperton\Proxy\Exception\RequestException;
 
+use const STREAM_CRYPTO_METHOD_ANY_CLIENT;
+
 final class Client implements ClientInterface
 {
 	/** @var string */
 	protected $userAgent = 'SempertonProxy/1.0 (+https://github.com/semperton/proxy)';
 
 	/** @var int */
-	protected $sslMethod = STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT;
-
-	/** @var int */
-	protected $bufferSize = 4096;
+	protected $bufferSize;
 
 	/** @var ResponseFactoryInterface */
 	protected $responseFactory;
@@ -36,11 +35,13 @@ final class Client implements ClientInterface
 	public function __construct(
 		ResponseFactoryInterface $responseFactory,
 		int $timeout = 10,
-		array $contextOptions = []
+		array $contextOptions = [],
+		int $bufferSize = 4096
 	) {
 		$this->responseFactory = $responseFactory;
 		$this->timeout = $timeout;
 		$this->contextOptions = $contextOptions;
+		$this->bufferSize = $bufferSize;
 	}
 
 	public function sendRequest(RequestInterface $request): ResponseInterface
@@ -86,7 +87,8 @@ final class Client implements ClientInterface
 
 		if ($request->getUri()->getScheme() === 'https') {
 
-			if (false === @stream_socket_enable_crypto($socket, true, $this->sslMethod)) {
+			$sslMethod = $this->contextOptions['ssl']['crypto_method'] ?? STREAM_CRYPTO_METHOD_ANY_CLIENT;
+			if (false === @stream_socket_enable_crypto($socket, true, $sslMethod)) {
 				$error = error_get_last();
 				throw new NetworkException($request, 'Cannot enable tls: ' . (isset($error) ? $error['message'] : ''));
 			}
