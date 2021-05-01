@@ -27,6 +27,9 @@ final class Client implements ClientInterface
 	/** @var int */
 	protected $timeout = 10;
 
+	/** @var string */
+	protected $userAgent = 'SempertonProxy/1.0 (+https://github.com/semperton/proxy)';
+
 	public function __construct(ResponseFactoryInterface $responseFactory, array $options = [])
 	{
 		$this->responseFactory = $responseFactory;
@@ -36,6 +39,10 @@ final class Client implements ClientInterface
 	{
 		if (!$request->hasHeader('Connection')) {
 			$request = $request->withHeader('Connection', 'close');
+		}
+
+		if (!$request->hasHeader('User-Agent')) {
+			$request = $request->withHeader('User-Agent', $this->userAgent);
 		}
 
 		$address = $this->getRemoteAddress($request);
@@ -172,7 +179,7 @@ final class Client implements ClientInterface
 	{
 		$size = $request->getBody()->getSize();
 
-		if ($size !== null && $size !== 0 && !$request->hasHeader('Content-Length')) {
+		if ($size !== null && $size > 0 && !$request->hasHeader('Content-Length')) {
 			$request = $request->withHeader('Content-Length', (string)$size);
 		}
 
@@ -241,22 +248,23 @@ final class Client implements ClientInterface
 		if (!strlen($bytes)) {
 			return 0;
 		}
+
 		$result = @fwrite($stream, $bytes);
-		if (0 !== $result) {
+
+		if ($result !== 0) {
 			return $result;
 		}
 
-		$read = [];
 		$write = [$stream];
-		$except = [];
+		@stream_select([], $write, [], 0);
 
-		@stream_select($read, $write, $except, 0);
 		if (!$write) {
 			return 0;
 		}
 
 		$result = @fwrite($stream, $bytes);
-		if (0 !== $result) {
+
+		if ($result !== 0) {
 			return $result;
 		}
 
