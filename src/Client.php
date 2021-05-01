@@ -15,31 +15,38 @@ use Semperton\Proxy\Exception\RequestException;
 
 final class Client implements ClientInterface
 {
-	/** @var ResponseFactoryInterface */
-	protected $responseFactory;
-
-	/** @var int */
-	protected $bufferSize = 8192;
+	/** @var string */
+	protected $userAgent = 'SempertonProxy/1.0 (+https://github.com/semperton/proxy)';
 
 	/** @var int */
 	protected $sslMethod = STREAM_CRYPTO_METHOD_TLSv1_2_CLIENT;
 
 	/** @var int */
-	protected $timeout = 10;
+	protected $bufferSize = 4096;
 
-	/** @var string */
-	protected $userAgent = 'SempertonProxy/1.0 (+https://github.com/semperton/proxy)';
+	/** @var ResponseFactoryInterface */
+	protected $responseFactory;
 
-	public function __construct(ResponseFactoryInterface $responseFactory, array $options = [])
-	{
+	/** @var int */
+	protected $timeout;
+
+	/** @var array */
+	protected $contextOptions;
+
+	public function __construct(
+		ResponseFactoryInterface $responseFactory,
+		int $timeout = 10,
+		array $contextOptions = []
+	) {
 		$this->responseFactory = $responseFactory;
+		$this->timeout = $timeout;
+		$this->contextOptions = $contextOptions;
 	}
 
 	public function sendRequest(RequestInterface $request): ResponseInterface
 	{
-		if (!$request->hasHeader('Connection')) {
-			$request = $request->withHeader('Connection', 'close');
-		}
+		// keep-alive not supported for now
+		$request = $request->withHeader('Connection', 'close');
 
 		if (!$request->hasHeader('User-Agent')) {
 			$request = $request->withHeader('User-Agent', $this->userAgent);
@@ -68,7 +75,8 @@ final class Client implements ClientInterface
 		$errNo = null;
 		$errMsg = null;
 
-		$socket = @stream_socket_client($remote, $errNo, $errMsg, $this->timeout, STREAM_CLIENT_CONNECT);
+		$options = stream_context_create($this->contextOptions);
+		$socket = @stream_socket_client($remote, $errNo, $errMsg, $this->timeout, STREAM_CLIENT_CONNECT, $options);
 
 		if ($socket === false) {
 			throw new NetworkException($request, $errMsg, $errNo);
