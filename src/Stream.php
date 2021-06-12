@@ -7,6 +7,14 @@ namespace Semperton\Proxy;
 use Psr\Http\Message\StreamInterface;
 use RuntimeException;
 
+use function fclose;
+use function ftell;
+use function feof;
+use function fread;
+use function strlen;
+use function stream_get_contents;
+use function stream_get_meta_data;
+
 final class Stream implements StreamInterface
 {
 	/** @var resource */

@@ -13,7 +13,25 @@ use Psr\Http\Message\StreamInterface;
 use Semperton\Proxy\Exception\NetworkException;
 use Semperton\Proxy\Exception\RequestException;
 
+use const STREAM_CLIENT_CONNECT;
 use const STREAM_CRYPTO_METHOD_ANY_CLIENT;
+
+use function fclose;
+use function stream_context_create;
+use function stream_socket_client;
+use function stream_set_timeout;
+use function stream_socket_enable_crypto;
+use function error_get_last;
+use function fgets;
+use function trim;
+use function stream_get_meta_data;
+use function explode;
+use function implode;
+use function array_shift;
+use function substr;
+use function strlen;
+use function fwrite;
+use function stream_select;
 
 final class Client implements ClientInterface
 {
