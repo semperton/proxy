@@ -1,13 +1,12 @@
 <div align="center">
 <a href="https://github.com/semperton">
-<img src="https://avatars0.githubusercontent.com/u/76976189?s=140" alt="Semperton">
+<img width="140" src="https://raw.githubusercontent.com/semperton/.github/main/readme-logo.svg" alt="Semperton">
 </a>
 <h1>Semperton Proxy</h1>
 <p>Simple PSR-18 HTTP client based on PHP's native stream socket.</p>
-//
 </div>
 
-<hr>
+---
 
 ## Installation
 
