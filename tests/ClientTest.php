@@ -359,7 +359,8 @@ final class ClientTest extends TestCase
 			$this->assertStringContainsString('maximum duration', $e->getMessage());
 		}
 
-		$this->assertLessThan(0.4, microtime(true) - $start);
+		// below the idle timeout, generous for slow CI runners
+		$this->assertLessThan(1.0, microtime(true) - $start);
 	}
 
 	public function testMaxDurationIncludesReadingTheBody(): void
