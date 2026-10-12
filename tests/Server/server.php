@@ -7,9 +7,15 @@ declare(strict_types=1);
  *
  * Prints the port it listens on, then answers each connection
  * with a canned (sometimes deliberately malformed) response chosen by path.
+ *
+ * Usage: php server.php [--tls <pem file with certificate and key>]
  */
 
-$server = stream_socket_server('tcp://127.0.0.1:0', $errorCode, $errorMessage);
+$tls = ($argv[1] ?? '') === '--tls';
+$context = stream_context_create($tls ? ['ssl' => ['local_cert' => $argv[2] ?? '']] : []);
+$flags = STREAM_SERVER_BIND | STREAM_SERVER_LISTEN;
+
+$server = stream_socket_server(($tls ? 'tls' : 'tcp') . '://127.0.0.1:0', $errorCode, $errorMessage, $flags, $context);
 
 if ($server === false) {
 	fwrite(STDERR, "Unable to start server: $errorMessage\n");

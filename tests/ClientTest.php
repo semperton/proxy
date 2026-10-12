@@ -122,6 +122,54 @@ final class ClientTest extends TestCase
 		$this->assertStringEndsWith("\r\n\r\n5\r\nHello\r\n0\r\n\r\n", $echo);
 	}
 
+	public function testEmptyChunkedRequest(): void
+	{
+		$request = $this->requestFactory
+			->createRequest('POST', self::url('/echo'))
+			->withHeader('Transfer-Encoding', 'chunked');
+
+		$echo = $this->client->sendRequest($request)->getBody()->getContents();
+
+		$this->assertStringEndsWith("\r\n\r\n0\r\n\r\n", $echo);
+	}
+
+	public function testRequestIsRoutedByHostHeader(): void
+	{
+		$host = '127.0.0.1:' . self::$port;
+		$request = $this->requestFactory->createRequest('GET', '/echo')->withHeader('Host', $host);
+
+		$echo = $this->client->sendRequest($request)->getBody()->getContents();
+
+		$this->assertStringStartsWith("GET /echo HTTP/1.1\r\nHost: $host\r\n", $echo);
+	}
+
+	public function testAsteriskFormRequest(): void
+	{
+		$request = $this->requestFactory->createRequest('OPTIONS', self::url('/'))->withRequestTarget('*');
+
+		$echo = $this->client->sendRequest($request)->getBody()->getContents();
+
+		$this->assertStringStartsWith("OPTIONS * HTTP/1.1\r\n", $echo);
+	}
+
+	public function testAbsoluteFormRequest(): void
+	{
+		$request = $this->requestFactory->createRequest('GET', self::url('/echo'))->withRequestTarget(self::url('/echo'));
+
+		$echo = $this->client->sendRequest($request)->getBody()->getContents();
+
+		$this->assertStringStartsWith('GET ' . self::url('/echo') . " HTTP/1.1\r\n", $echo);
+	}
+
+	public function testCookiesAreJoinedBySemicolons(): void
+	{
+		$request = $this->requestFactory->createRequest('GET', self::url('/echo'))->withHeader('Cookie', ['a=1', 'b=2']);
+
+		$echo = $this->client->sendRequest($request)->getBody()->getContents();
+
+		$this->assertStringContainsString("\r\nCookie: a=1; b=2\r\n", $echo);
+	}
+
 	public function testChunkedResponseIsDecoded(): void
 	{
 		$response = $this->send('GET', '/chunked');

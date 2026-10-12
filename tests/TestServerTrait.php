@@ -6,6 +6,7 @@ namespace Semperton\Proxy\Tests;
 
 use RuntimeException;
 
+use function array_merge;
 use function fgets;
 use function is_resource;
 use function proc_close;
@@ -24,7 +25,8 @@ trait TestServerTrait
 
 	public static function setUpBeforeClass(): void
 	{
-		$process = proc_open([PHP_BINARY, __DIR__ . '/Server/server.php'], [1 => ['pipe', 'w']], $pipes);
+		$command = array_merge([PHP_BINARY, __DIR__ . '/Server/server.php'], self::serverArguments());
+		$process = proc_open($command, [1 => ['pipe', 'w']], $pipes);
 
 		if (!is_resource($process)) {
 			throw new RuntimeException('Unable to start the test server');
@@ -32,6 +34,12 @@ trait TestServerTrait
 
 		self::$server = $process;
 		self::$port = (int) trim((string) fgets($pipes[1]));
+
+		if (self::$port === 0) {
+			self::tearDownAfterClass();
+
+			throw new RuntimeException('The test server did not report its port');
+		}
 	}
 
 	public static function tearDownAfterClass(): void
@@ -44,8 +52,16 @@ trait TestServerTrait
 		self::$server = null;
 	}
 
-	private static function url(string $path): string
+	/**
+	 * @return list<string>
+	 */
+	private static function serverArguments(): array
 	{
-		return 'http://127.0.0.1:' . self::$port . $path;
+		return [];
+	}
+
+	private static function url(string $path, string $scheme = 'http'): string
+	{
+		return "$scheme://127.0.0.1:" . self::$port . $path;
 	}
 }
