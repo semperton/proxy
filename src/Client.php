@@ -12,11 +12,11 @@ use Psr\Http\Client\ClientInterface;
 use Psr\Http\Message\RequestInterface;
 use Psr\Http\Message\ResponseFactoryInterface;
 use Psr\Http\Message\ResponseInterface;
-use Psr\Http\Message\StreamInterface;
 use RuntimeException;
 use Semperton\Proxy\Exception\NetworkException;
 use Semperton\Proxy\Exception\RequestException;
 use Semperton\Proxy\Internal\Connection;
+use Semperton\Proxy\Internal\ResponseBody;
 use Throwable;
 
 use function array_map;
@@ -28,7 +28,6 @@ use function end;
 use function explode;
 use function filter_var;
 use function fopen;
-use function ftell;
 use function fwrite;
 use function implode;
 use function in_array;
@@ -195,41 +194,17 @@ final class Client implements ClientInterface
 			return $request;
 		}
 
-		// a client must not send chunked requests without knowing that the server supports HTTP/1.1,
-		// so bodies of unknown size are buffered to determine their length
-		if ($size === null) {
-			$body = $this->bufferBody($body);
-			$size = (int) $body->getSize();
-			$request = $request->withBody($body);
-		}
+		// bodies of unknown size get their Content-Length when they are buffered
+		return $size === null ? $request : $this->withContentLength($request, $size);
+	}
 
+	private function withContentLength(RequestInterface $request, int $size): RequestInterface
+	{
 		if ($size > 0 || in_array($request->getMethod(), self::CONTENT_METHODS, true)) {
 			return $request->withHeader('Content-Length', (string) $size);
 		}
 
 		return $request;
-	}
-
-	private function bufferBody(StreamInterface $body): StreamInterface
-	{
-		$buffer = fopen('php://temp', 'r+b');
-
-		if ($buffer === false) {
-			throw new RuntimeException('Unable to create a buffer');
-		}
-
-		if ($body->isSeekable()) {
-			$body->rewind();
-		}
-
-		while (!$body->eof()) {
-			fwrite($buffer, $body->read($this->bufferSize));
-		}
-
-		$size = (int) ftell($buffer);
-		rewind($buffer);
-
-		return new Stream(Connection::wrap($buffer), $size, false, $this->bufferSize);
 	}
 
 	/**
@@ -258,12 +233,20 @@ final class Client implements ClientInterface
 
 	private function writeRequest(Connection $connection, RequestInterface $request): void
 	{
-		$head = $this->serializeHead($request);
+		$chunks = $this->readBody($request);
 		$chunked = $request->hasHeader('Transfer-Encoding');
-		$buffer = $head;
+
+		// a client must not send chunked requests without knowing that the server supports HTTP/1.1
+		// (RFC 9112 §6.3), so bodies of unknown size are buffered to determine their length
+		if (!$chunked && $request->getBody()->getSize() === null && !$request->hasHeader('Content-Length')) {
+			[$chunks, $size] = $this->bufferBody($chunks);
+			$request = $this->withContentLength($request, $size);
+		}
+
+		$buffer = $this->serializeHead($request);
 
 		// output is coalesced, so the head and a small body are sent in a single write
-		foreach ($this->readBody($request) as $data) {
+		foreach ($chunks as $data) {
 			$buffer .= $chunked ? sprintf("%x\r\n%s\r\n", strlen($data), $data) : $data;
 
 			if (strlen($buffer) >= $this->bufferSize) {
@@ -273,6 +256,49 @@ final class Client implements ClientInterface
 		}
 
 		$connection->write($chunked ? $buffer . "0\r\n\r\n" : $buffer);
+	}
+
+	/**
+	 * @param iterable<string> $chunks
+	 * @return array{Generator<int, string>, int} buffered chunks, size
+	 */
+	private function bufferBody(iterable $chunks): array
+	{
+		$buffer = fopen('php://temp', 'r+b');
+
+		if ($buffer === false) {
+			throw new RuntimeException('Unable to create a buffer for the request body');
+		}
+
+		$size = 0;
+
+		foreach ($chunks as $data) {
+			fwrite($buffer, $data);
+			$size += strlen($data);
+		}
+
+		rewind($buffer);
+
+		return [$this->readBuffer($buffer), $size];
+	}
+
+	/**
+	 * @param resource $buffer
+	 * @return Generator<int, string>
+	 */
+	private function readBuffer($buffer): Generator
+	{
+		try {
+			while (!feof($buffer)) {
+				$data = (string) fread($buffer, $this->bufferSize);
+
+				if ($data !== '') {
+					yield $data;
+				}
+			}
+		} finally {
+			fclose($buffer);
+		}
 	}
 
 	/**
@@ -402,7 +428,9 @@ final class Client implements ClientInterface
 		$status = $response->getStatusCode();
 
 		if ($request->getMethod() === 'HEAD' || $status === 204 || $status === 304) {
-			return $response->withBody(new Stream($connection, 0, false, $this->bufferSize));
+			$connection->close();
+
+			return $response->withBody(ResponseBody::empty());
 		}
 
 		if ($response->hasHeader('Transfer-Encoding')) {
@@ -413,7 +441,7 @@ final class Client implements ClientInterface
 			$codings = array_map('trim', explode(',', strtolower($response->getHeaderLine('Transfer-Encoding'))));
 
 			if (end($codings) !== 'chunked') {
-				return $response->withBody(new Stream($connection, null, false, $this->bufferSize));
+				return $response->withBody(ResponseBody::untilClose($connection, $this->bufferSize));
 			}
 
 			// the chunked coding is removed while reading, keep the headers consistent (RFC 9112 §7.1.3)
@@ -424,7 +452,7 @@ final class Client implements ClientInterface
 
 			return $response
 				->withoutHeader('Content-Length')
-				->withBody(new Stream($connection, null, true, $this->bufferSize));
+				->withBody(ResponseBody::chunked($connection, $this->bufferSize));
 		}
 
 		if ($response->hasHeader('Content-Length')) {
@@ -436,10 +464,10 @@ final class Client implements ClientInterface
 
 			return $response
 				->withHeader('Content-Length', (string) $length)
-				->withBody(new Stream($connection, $length, false, $this->bufferSize));
+				->withBody(ResponseBody::sized($connection, $length, $this->bufferSize));
 		}
 
-		return $response->withBody(new Stream($connection, null, false, $this->bufferSize));
+		return $response->withBody(ResponseBody::untilClose($connection, $this->bufferSize));
 	}
 
 	/**

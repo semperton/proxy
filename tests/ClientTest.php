@@ -16,13 +16,9 @@ use RuntimeException;
 use Semperton\Proxy\Client;
 use Semperton\Proxy\Exception\NetworkException;
 use Semperton\Proxy\Exception\RequestException;
-use Semperton\Proxy\Internal\Connection;
-use Semperton\Proxy\Stream;
+use Semperton\Proxy\Tests\Fixture\UnknownSizeStream;
 
 use function fclose;
-use function fopen;
-use function fwrite;
-use function rewind;
 use function str_repeat;
 use function stream_socket_get_name;
 use function stream_socket_server;
@@ -102,7 +98,7 @@ final class ClientTest extends TestCase
 	{
 		$request = $this->requestFactory
 			->createRequest('POST', self::url('/echo'))
-			->withBody($this->createUnknownSizeBody('Hello World'));
+			->withBody(new UnknownSizeStream('Hello World'));
 
 		$echo = $this->client->sendRequest($request)->getBody()->getContents();
 
@@ -117,7 +113,7 @@ final class ClientTest extends TestCase
 			->createRequest('POST', self::url('/echo'))
 			->withHeader('Transfer-Encoding', 'chunked')
 			->withHeader('Content-Length', '5')
-			->withBody($this->createUnknownSizeBody('Hello'));
+			->withBody(new UnknownSizeStream('Hello'));
 
 		$echo = $this->client->sendRequest($request)->getBody()->getContents();
 
@@ -375,15 +371,5 @@ final class ClientTest extends TestCase
 		}
 
 		return $this->client->sendRequest($request);
-	}
-
-	private function createUnknownSizeBody(string $contents): Stream
-	{
-		$resource = fopen('php://temp', 'r+b');
-		$this->assertNotFalse($resource);
-		fwrite($resource, $contents);
-		rewind($resource);
-
-		return new Stream(Connection::wrap($resource));
 	}
 }

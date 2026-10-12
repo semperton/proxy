@@ -2,20 +2,20 @@
 
 declare(strict_types=1);
 
-namespace Semperton\Proxy\Tests;
+namespace Semperton\Proxy\Tests\Internal;
 
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
 use Semperton\Proxy\Internal\Connection;
-use Semperton\Proxy\Stream;
+use Semperton\Proxy\Internal\ResponseBody;
 
 use function fopen;
 use function fwrite;
 use function is_resource;
 use function rewind;
 
-final class StreamTest extends TestCase
+final class ResponseBodyTest extends TestCase
 {
 	public function testSizedStream(): void
 	{
@@ -117,6 +117,20 @@ final class StreamTest extends TestCase
 		$stream->getContents();
 	}
 
+	public function testEmptyBody(): void
+	{
+		$stream = ResponseBody::empty();
+
+		$this->assertSame(0, $stream->getSize());
+		$this->assertTrue($stream->isReadable());
+		$this->assertTrue($stream->eof());
+		$this->assertSame('', $stream->read(10));
+		$this->assertSame('', $stream->getContents());
+		$this->assertSame([], $stream->getMetadata());
+		$this->assertNull($stream->detach());
+		$this->assertFalse($stream->isReadable());
+	}
+
 	public function testToStringDoesNotThrow(): void
 	{
 		$this->assertSame('', (string) $this->createStream('abc', 10));
@@ -173,7 +187,7 @@ final class StreamTest extends TestCase
 	{
 		$resource = fopen('php://temp', 'r+b');
 		$this->assertNotFalse($resource);
-		$stream = new Stream(Connection::wrap($resource));
+		$stream = ResponseBody::untilClose(Connection::wrap($resource), 8192);
 
 		$stream->close();
 		$stream->close();
@@ -185,13 +199,18 @@ final class StreamTest extends TestCase
 		$stream->eof();
 	}
 
-	private function createStream(string $contents, ?int $size = null, bool $chunked = false): Stream
+	private function createStream(string $contents, ?int $size = null, bool $chunked = false): ResponseBody
 	{
 		$resource = fopen('php://temp', 'r+b');
 		$this->assertNotFalse($resource);
 		fwrite($resource, $contents);
 		rewind($resource);
+		$connection = Connection::wrap($resource);
 
-		return new Stream(Connection::wrap($resource), $size, $chunked);
+		return match (true) {
+			$chunked => ResponseBody::chunked($connection, 8192),
+			$size === null => ResponseBody::untilClose($connection, 8192),
+			default => ResponseBody::sized($connection, $size, 8192),
+		};
 	}
 }

@@ -2,12 +2,11 @@
 
 declare(strict_types=1);
 
-namespace Semperton\Proxy;
+namespace Semperton\Proxy\Internal;
 
 use Override;
 use Psr\Http\Message\StreamInterface;
 use RuntimeException;
-use Semperton\Proxy\Internal\Connection;
 use Throwable;
 
 use function hexdec;
@@ -23,35 +22,33 @@ use const PHP_INT_SIZE;
 use const SEEK_SET;
 
 /**
- * Read-only body of a response, read directly from the connection.
+ * Read-only response body, read from the connection on demand.
  *
  * The body is framed in one of three ways (RFC 9112 §6.3):
- * - sized: exactly $size bytes (Content-Length)
- * - chunked: chunked transfer coding, decoded on the fly (RFC 9112 §7.1)
- * - close-delimited: everything until the server closes the connection
+ * - sized: exactly the number of bytes given by Content-Length
+ * - chunked: chunked transfer coding, decoded while reading (RFC 9112 §7.1)
+ * - until close: everything until the server closes the connection
+ *
+ * @internal
  */
-final class Stream implements StreamInterface
+final class ResponseBody implements StreamInterface
 {
 	private const MAX_LINE_LENGTH = 8192;
 
-	private ?Connection $connection;
+	private bool $closed = false;
+
+	private bool $finished;
 
 	private int $bytesRead = 0;
 
 	private int $chunkRemaining = 0;
 
-	private bool $finished;
-
-	/**
-	 * @param int|null $size Body length in bytes, null if chunked or close-delimited
-	 */
-	public function __construct(
-		Connection $connection,
-		private readonly ?int $size = null,
-		private readonly bool $chunked = false,
-		private readonly int $bufferSize = 8192,
+	private function __construct(
+		private ?Connection $connection,
+		private readonly ?int $size,
+		private readonly bool $chunked,
+		private readonly int $bufferSize,
 	) {
-		$this->connection = $connection;
 		$this->finished = $size === 0;
 	}
 
@@ -60,6 +57,27 @@ final class Stream implements StreamInterface
 		$this->close();
 	}
 
+	public static function empty(): self
+	{
+		return new self(null, 0, false, 1);
+	}
+
+	public static function sized(Connection $connection, int $length, int $bufferSize): self
+	{
+		return new self($connection, $length, false, $bufferSize);
+	}
+
+	public static function chunked(Connection $connection, int $bufferSize): self
+	{
+		return new self($connection, null, true, $bufferSize);
+	}
+
+	public static function untilClose(Connection $connection, int $bufferSize): self
+	{
+		return new self($connection, null, false, $bufferSize);
+	}
+
+	#[Override]
 	public function __toString(): string
 	{
 		try {
@@ -74,6 +92,7 @@ final class Stream implements StreamInterface
 	{
 		$this->connection?->close();
 		$this->connection = null;
+		$this->closed = true;
 	}
 
 	#[Override]
@@ -81,6 +100,7 @@ final class Stream implements StreamInterface
 	{
 		$resource = $this->connection?->detach();
 		$this->connection = null;
+		$this->closed = true;
 
 		return $resource;
 	}
@@ -88,13 +108,13 @@ final class Stream implements StreamInterface
 	#[Override]
 	public function getSize(): ?int
 	{
-		return $this->connection === null ? null : $this->size;
+		return $this->closed ? null : $this->size;
 	}
 
 	#[Override]
 	public function tell(): int
 	{
-		$this->connection();
+		$this->assertOpen();
 
 		return $this->bytesRead;
 	}
@@ -102,13 +122,13 @@ final class Stream implements StreamInterface
 	#[Override]
 	public function eof(): bool
 	{
-		$connection = $this->connection();
+		$this->assertOpen();
 
 		if ($this->finished) {
 			return true;
 		}
 
-		return $this->size === null && !$this->chunked && $connection->eof();
+		return $this->size === null && !$this->chunked && $this->connection()->eof();
 	}
 
 	#[Override]
@@ -144,13 +164,13 @@ final class Stream implements StreamInterface
 	#[Override]
 	public function isReadable(): bool
 	{
-		return $this->connection !== null;
+		return !$this->closed;
 	}
 
 	#[Override]
 	public function read(int $length): string
 	{
-		$connection = $this->connection();
+		$this->assertOpen();
 
 		if ($length < 0) {
 			throw new RuntimeException('Length must not be negative');
@@ -161,8 +181,10 @@ final class Stream implements StreamInterface
 		}
 
 		if ($this->chunked) {
-			return $this->readChunked($connection, $length);
+			return $this->readChunked($length);
 		}
+
+		$connection = $this->connection();
 
 		if ($this->size === null) {
 			$data = $connection->read($length);
@@ -187,7 +209,7 @@ final class Stream implements StreamInterface
 	#[Override]
 	public function getContents(): string
 	{
-		$connection = $this->connection();
+		$this->assertOpen();
 
 		if ($this->finished) {
 			return '';
@@ -197,14 +219,14 @@ final class Stream implements StreamInterface
 			$contents = '';
 
 			while (!$this->finished) {
-				$contents .= $this->readChunked($connection, $this->bufferSize);
+				$contents .= $this->readChunked($this->bufferSize);
 			}
 
 			return $contents;
 		}
 
 		$remaining = $this->size === null ? null : $this->size - $this->bytesRead;
-		$contents = $connection->readAll($remaining);
+		$contents = $this->connection()->readAll($remaining);
 		$this->bytesRead += strlen($contents);
 
 		if ($remaining !== null && strlen($contents) < $remaining) {
@@ -219,17 +241,15 @@ final class Stream implements StreamInterface
 	#[Override]
 	public function getMetadata(?string $key = null)
 	{
-		if ($this->connection === null) {
-			return $key === null ? [] : null;
-		}
-
-		$meta = $this->connection->metadata();
+		$meta = $this->connection?->metadata() ?? [];
 
 		return $key === null ? $meta : ($meta[$key] ?? null);
 	}
 
-	private function readChunked(Connection $connection, int $length): string
+	private function readChunked(int $length): string
 	{
+		$connection = $this->connection();
+
 		if ($this->chunkRemaining === 0) {
 			$this->chunkRemaining = $this->readChunkSize($connection);
 
@@ -288,12 +308,18 @@ final class Stream implements StreamInterface
 		return new RuntimeException('Incomplete response body, the connection was closed prematurely');
 	}
 
-	private function connection(): Connection
+	private function assertOpen(): void
 	{
-		if ($this->connection === null) {
+		if ($this->closed) {
 			throw new RuntimeException('Stream is detached or closed');
 		}
+	}
 
-		return $this->connection;
+	/**
+	 * Only called while the body is not finished, which implies a connection.
+	 */
+	private function connection(): Connection
+	{
+		return $this->connection ?? throw new RuntimeException('Stream has no connection');
 	}
 }
