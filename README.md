@@ -83,6 +83,7 @@ Reading the response body throws a `RuntimeException` if the body is incomplete,
 - Request bodies of unknown size are buffered to send a `Content-Length`. Set a `Transfer-Encoding: chunked` header on the request to stream them chunked instead
 - Interim `1xx` responses are skipped
 - One connection per request (`Connection: close`), no redirects, no proxies, no protocol upgrades
+- Response heads are limited to 256 KiB and 10 interim responses, so a hostile server cannot exhaust memory
 
 This is just a simple HTTP client for single requests. If you are going to do heavy API work (concurrent requests, connection reuse, retries, etc.), you should consider using `guzzlehttp/guzzle` or `symfony/http-client`.
 
@@ -91,6 +92,6 @@ This is just a simple HTTP client for single requests. If you are going to do he
 composer check     # runs all of the following
 composer cs        # coding style (composer cs:fix to fix)
 composer psalm     # static analysis
-composer test      # offline test suite
+composer test      # offline test suite (includes TLS against a local server)
 vendor/bin/phpunit --group network  # tests against httpbin.org
 ```

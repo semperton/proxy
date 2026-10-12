@@ -6,10 +6,12 @@
 
 - Requires PHP 8.1 or later. Supports `psr/http-message` 1.1 and 2.0.
 - `NetworkException` and `RequestException` now extend the abstract `ClientException`. All three are final or abstract, and `ExceptionTrait` was removed.
+- `Semperton\Proxy\Stream` was removed. Response bodies are an internal `StreamInterface` implementation.
 - `Content-Length` and `Transfer-Encoding: chunked` are removed from a response when its chunked body is decoded.
 - Request bodies of unknown size are buffered so they can be sent with a `Content-Length`.
 - The default buffer size changed from 4096 to 8192 bytes.
 - The timeout now accepts fractions of a second (`float`).
+- The default `User-Agent` no longer contains a version.
 
 ### Fixed
 
@@ -23,10 +25,16 @@
 - Unsupported protocol versions, schemes, request targets, `CONNECT` and upgrades throw a `RequestException`.
 - All errors thrown by `sendRequest()` implement `ClientExceptionInterface`.
 - Obsolete line folding in response headers is unfolded.
-- `Stream::close()` and `Stream::detach()` can be called safely more than once. `Stream::__toString()` never throws.
+- Response bodies can be closed or detached safely more than once, and casting them to string never throws.
 - The socket is closed when the TLS handshake fails.
+- A timed-out read is reported as a timeout, not as a generic read error.
+
+### Security
+
+- Response heads are limited to 256 KiB, with lines of at most 64 KiB and at most 10 interim responses.
+- A request body that does not match its `Content-Length` throws a `RequestException` and is not sent with wrong framing.
 
 ### Added
 
 - php-cs-fixer, Psalm 6, PHPUnit 10–12 and GitHub Actions CI.
-- An offline test suite that runs against a local raw socket server.
+- An offline test suite that runs against a local raw socket server, including TLS with a generated certificate.

@@ -20,6 +20,12 @@ use Throwable;
 
 use function parse_url;
 
+/**
+ * PSR-18 HTTP/1.x client on top of PHP's stream sockets.
+ *
+ * Every request uses its own connection, which is closed once the response body has been read.
+ * Redirects are not followed and response bodies are not decompressed.
+ */
 final class Client implements ClientInterface
 {
 	private const DEFAULT_PORTS = ['http' => 80, 'https' => 443];
