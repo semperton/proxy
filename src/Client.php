@@ -39,6 +39,7 @@ final class Client implements ClientInterface
 	 * @param array<string, array<string, mixed>> $contextOptions Stream context options, see https://www.php.net/manual/en/context.php
 	 * @param int $bufferSize Number of bytes to read/write at once
 	 * @param float|null $maxDuration Seconds the whole exchange may take, including reading the response body
+	 * @param string|null $unixSocket Path of a Unix domain socket to connect to instead of the host of the request
 	 */
 	public function __construct(
 		ResponseFactoryInterface $responseFactory,
@@ -46,6 +47,7 @@ final class Client implements ClientInterface
 		private readonly array $contextOptions = [],
 		int $bufferSize = 8192,
 		private readonly ?float $maxDuration = null,
+		private readonly ?string $unixSocket = null,
 	) {
 		if ($timeout <= 0) {
 			throw new InvalidArgumentException('Timeout must be greater than zero');
@@ -53,6 +55,10 @@ final class Client implements ClientInterface
 
 		if ($maxDuration !== null && $maxDuration <= 0) {
 			throw new InvalidArgumentException('Maximum duration must be greater than zero');
+		}
+
+		if ($unixSocket === '') {
+			throw new InvalidArgumentException('Unix socket path must not be empty');
 		}
 
 		if ($bufferSize < 1) {
@@ -92,6 +98,15 @@ final class Client implements ClientInterface
 	{
 		$uri = $request->getUri();
 		$scheme = $uri->getScheme() ?: 'http';
+
+		if ($this->unixSocket !== null) {
+			if ($scheme === 'https') {
+				throw new RequestException($request, 'TLS over Unix domain sockets is not supported');
+			}
+
+			return ["unix://{$this->unixSocket}", false];
+		}
+
 		$host = $uri->getHost();
 		$port = $uri->getPort();
 

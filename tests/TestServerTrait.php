@@ -33,13 +33,16 @@ trait TestServerTrait
 		}
 
 		self::$server = $process;
-		self::$port = (int) trim((string) fgets($pipes[1]));
+		$address = trim((string) fgets($pipes[1]));
 
-		if (self::$port === 0) {
+		if ($address === '') {
 			self::tearDownAfterClass();
 
-			throw new RuntimeException('The test server did not report its port');
+			throw new RuntimeException('The test server did not report its address');
 		}
+
+		// a TCP port, or the socket path in Unix socket mode
+		self::$port = (int) $address;
 	}
 
 	public static function tearDownAfterClass(): void

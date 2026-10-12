@@ -5,25 +5,37 @@ declare(strict_types=1);
 /**
  * Minimal raw HTTP server for the test suite.
  *
- * Prints the port it listens on, then answers each connection
+ * Prints its TCP port or Unix socket path, then answers each connection
  * with a canned (sometimes deliberately malformed) response chosen by path.
  *
- * Usage: php server.php [--tls <pem file with certificate and key>]
+ * Usage: php server.php [--tls <pem file with certificate and key> | --unix <socket path>]
  */
 
-$tls = ($argv[1] ?? '') === '--tls';
-$context = stream_context_create($tls ? ['ssl' => ['local_cert' => $argv[2] ?? '']] : []);
+$mode = $argv[1] ?? '';
+$option = $argv[2] ?? '';
+
+$address = match ($mode) {
+	'--tls' => 'tls://127.0.0.1:0',
+	'--unix' => "unix://$option",
+	default => 'tcp://127.0.0.1:0',
+};
+
+if ($mode === '--unix' && file_exists($option)) {
+	unlink($option);
+}
+
+$context = stream_context_create($mode === '--tls' ? ['ssl' => ['local_cert' => $option]] : []);
 $flags = STREAM_SERVER_BIND | STREAM_SERVER_LISTEN;
 
-$server = stream_socket_server(($tls ? 'tls' : 'tcp') . '://127.0.0.1:0', $errorCode, $errorMessage, $flags, $context);
+$server = stream_socket_server($address, $errorCode, $errorMessage, $flags, $context);
 
 if ($server === false) {
 	fwrite(STDERR, "Unable to start server: $errorMessage\n");
 	exit(1);
 }
 
-$address = (string) stream_socket_get_name($server, false);
-echo substr($address, strrpos($address, ':') + 1) . "\n";
+$name = (string) stream_socket_get_name($server, false);
+echo ($mode === '--unix' ? $option : substr($name, strrpos($name, ':') + 1)) . "\n";
 
 /**
  * @param resource $connection
