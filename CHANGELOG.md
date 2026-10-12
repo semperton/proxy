@@ -36,5 +36,8 @@
 
 ### Added
 
+- `maxDuration` limits the total time of a request, including reading the response body.
+- `unixSocket` connects to a Unix domain socket instead of the host of the request.
+- `decodeContent` requests and decodes `gzip` and `deflate` compressed responses.
 - php-cs-fixer, Psalm 6, PHPUnit 10–12 and GitHub Actions CI.
 - An offline test suite that runs against a local raw socket server, including TLS with a generated certificate.

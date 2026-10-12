@@ -25,7 +25,7 @@ use function parse_url;
  * PSR-18 HTTP/1.x client on top of PHP's stream sockets.
  *
  * Every request uses its own connection, which is closed once the response body has been read.
- * Redirects are not followed and response bodies are not decompressed.
+ * Redirects are not followed, and compressed responses are only decoded when enabled.
  */
 final class Client implements ClientInterface
 {
