@@ -118,6 +118,11 @@ Reading the response body throws a `RuntimeException` if the body is incomplete,
 
 This is just a simple HTTP client for single requests. If you are going to do heavy API work (concurrent requests, connection reuse, retries, etc.), you should consider using `guzzlehttp/guzzle` or `symfony/http-client`.
 
+## Versioning
+This library follows [semantic versioning](https://semver.org). The public API is the `Client` class, including the names of its constructor parameters since they can be used as named arguments, and the classes in `Semperton\Proxy\Exception`.
+
+Everything in `Semperton\Proxy\Internal` is an implementation detail and may change in any release.
+
 ## Development
 ```
 composer check     # runs all of the following
