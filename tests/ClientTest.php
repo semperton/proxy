@@ -2,50 +2,384 @@
 
 declare(strict_types=1);
 
+namespace Semperton\Proxy\Tests;
+
 use HttpSoft\Message\RequestFactory;
 use HttpSoft\Message\ResponseFactory;
+use InvalidArgumentException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
-use Psr\Http\Message\RequestFactoryInterface;
-use Psr\Http\Message\ResponseFactoryInterface;
+use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
+use Psr\Http\Message\UriInterface;
+use RuntimeException;
 use Semperton\Proxy\Client;
+use Semperton\Proxy\Exception\NetworkException;
+use Semperton\Proxy\Exception\RequestException;
+use Semperton\Proxy\Stream;
+
+use function fclose;
+use function fopen;
+use function fwrite;
+use function rewind;
+use function str_repeat;
+use function stream_socket_get_name;
+use function stream_socket_server;
 
 final class ClientTest extends TestCase
 {
-	/** @var ResponseFactoryInterface */
-	protected $responseFactory;
+	use TestServerTrait;
 
-	/** @var RequestFactoryInterface */
-	protected $requestFactory;
+	private Client $client;
 
-	public function setUp(): void
+	private RequestFactory $requestFactory;
+
+	protected function setUp(): void
 	{
-		$this->responseFactory = new ResponseFactory();
+		$this->client = new Client(new ResponseFactory(), 2);
 		$this->requestFactory = new RequestFactory();
 	}
 
-	public function testPost(): void
+	public function testGetRequest(): void
 	{
-		$client = new Client($this->responseFactory);
-		$request = $this->requestFactory->createRequest('POST', 'https://httpbin.org/anything');
+		$response = $this->send('GET', '/echo?foo=bar');
+		$port = self::$port;
 
-		$request->getBody()->write('Hello World');
-
-		$response = $client->sendRequest($request);
-
-		$this->assertTrue($response->hasHeader('Content-Type'));
-		$this->assertEquals('application/json', $response->getHeaderLine('Content-Type'));
-
-		$body = json_decode((string)$response->getBody(), true);
-		$this->assertEquals('Hello World', $body['data']);
+		$this->assertSame(200, $response->getStatusCode());
+		$this->assertSame('1.1', $response->getProtocolVersion());
+		$this->assertStringStartsWith(
+			"GET /echo?foo=bar HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n",
+			(string) $response->getBody(),
+		);
 	}
 
-	public function testStream(): void
+	public function testRequiredHeadersAreSent(): void
 	{
-		$client = new Client($this->responseFactory);
-		$request = $this->requestFactory->createRequest('GET', 'https://httpbin.org/stream/5');
+		$request = $this->requestFactory->createRequest('GET', self::url('/echo'))->withoutHeader('Host');
+		$echo = (string) $this->client->sendRequest($request)->getBody();
 
-		$response = $client->sendRequest($request);
-		$this->assertTrue($response->hasHeader('Transfer-Encoding'));
-		$this->assertEquals('chunked', $response->getHeaderLine('Transfer-Encoding'));
+		$this->assertStringContainsString("\r\nHost: 127.0.0.1:" . self::$port . "\r\n", $echo);
+		$this->assertStringContainsString("\r\nConnection: close\r\n", $echo);
+		$this->assertStringContainsString("\r\nUser-Agent: SempertonProxy/1.0", $echo);
+		$this->assertStringNotContainsString('Content-Length', $echo);
+	}
+
+	public function testCustomUserAgentIsKept(): void
+	{
+		$request = $this->requestFactory->createRequest('GET', self::url('/echo'))->withHeader('User-Agent', 'Custom/1.0');
+		$echo = (string) $this->client->sendRequest($request)->getBody();
+
+		$this->assertStringContainsString("\r\nUser-Agent: Custom/1.0\r\n", $echo);
+		$this->assertStringNotContainsString('SempertonProxy', $echo);
+	}
+
+	public function testPostWithBody(): void
+	{
+		$echo = (string) $this->send('POST', '/echo', 'Hello World')->getBody();
+
+		$this->assertStringContainsString("\r\nContent-Length: 11\r\n", $echo);
+		$this->assertStringEndsWith("\r\n\r\nHello World", $echo);
+	}
+
+	public function testPostWithEmptyBody(): void
+	{
+		$echo = (string) $this->send('POST', '/echo')->getBody();
+
+		$this->assertStringContainsString("\r\nContent-Length: 0\r\n", $echo);
+	}
+
+	public function testLargeBodyIsStreamed(): void
+	{
+		$data = str_repeat('0123456789', 100_000);
+		$echo = (string) $this->send('PUT', '/echo', $data)->getBody();
+
+		$this->assertStringContainsString("\r\nContent-Length: 1000000\r\n", $echo);
+		$this->assertStringEndsWith("\r\n\r\n" . $data, $echo);
+	}
+
+	public function testBodyOfUnknownSizeIsBuffered(): void
+	{
+		$request = $this->requestFactory
+			->createRequest('POST', self::url('/echo'))
+			->withBody($this->createUnknownSizeBody('Hello World'));
+
+		$echo = (string) $this->client->sendRequest($request)->getBody();
+
+		$this->assertStringContainsString("\r\nContent-Length: 11\r\n", $echo);
+		$this->assertStringNotContainsString('Transfer-Encoding', $echo);
+		$this->assertStringEndsWith("\r\n\r\nHello World", $echo);
+	}
+
+	public function testExplicitChunkedRequest(): void
+	{
+		$request = $this->requestFactory
+			->createRequest('POST', self::url('/echo'))
+			->withHeader('Transfer-Encoding', 'chunked')
+			->withHeader('Content-Length', '5')
+			->withBody($this->createUnknownSizeBody('Hello'));
+
+		$echo = (string) $this->client->sendRequest($request)->getBody();
+
+		$this->assertStringContainsString("\r\nTransfer-Encoding: chunked\r\n", $echo);
+		$this->assertStringNotContainsString('Content-Length', $echo);
+		$this->assertStringEndsWith("\r\n\r\n5\r\nHello\r\n0\r\n\r\n", $echo);
+	}
+
+	public function testChunkedResponseIsDecoded(): void
+	{
+		$response = $this->send('GET', '/chunked');
+
+		$this->assertSame('Hello, World!', (string) $response->getBody());
+		$this->assertFalse($response->hasHeader('Transfer-Encoding'));
+		$this->assertFalse($response->hasHeader('Content-Length'));
+		$this->assertFalse($response->hasHeader('X-Trailer'));
+	}
+
+	public function testOnlyChunkedCodingIsRemoved(): void
+	{
+		$response = $this->send('GET', '/chunked-gzip');
+
+		$this->assertSame('abc', (string) $response->getBody());
+		$this->assertSame('gzip', $response->getHeaderLine('Transfer-Encoding'));
+	}
+
+	public function testNonChunkedTransferCodingIsReadUntilClose(): void
+	{
+		$response = $this->send('GET', '/gzip-close');
+
+		$this->assertSame('raw', (string) $response->getBody());
+		$this->assertSame('gzip', $response->getHeaderLine('Transfer-Encoding'));
+	}
+
+	public function testTruncatedChunkedBodyIsIncomplete(): void
+	{
+		$body = $this->send('GET', '/chunked-truncated')->getBody();
+
+		$this->expectException(RuntimeException::class);
+		$this->expectExceptionMessage('Incomplete response body');
+
+		$body->getContents();
+	}
+
+	public function testInterimResponsesAreSkipped(): void
+	{
+		$response = $this->send('GET', '/interim');
+
+		$this->assertSame(200, $response->getStatusCode());
+		$this->assertFalse($response->hasHeader('Link'));
+		$this->assertSame('ok', (string) $response->getBody());
+	}
+
+	/**
+	 * @return iterable<string, array{string, string}>
+	 */
+	public static function bodilessResponseProvider(): iterable
+	{
+		yield 'HEAD request' => ['HEAD', '/length'];
+		yield '204 No Content' => ['GET', '/no-content'];
+		yield '304 Not Modified' => ['GET', '/not-modified'];
+	}
+
+	#[DataProvider('bodilessResponseProvider')]
+	public function testResponsesWithoutBody(string $method, string $path): void
+	{
+		$body = $this->send($method, $path)->getBody();
+
+		$this->assertTrue($body->eof());
+		$this->assertSame('', (string) $body);
+	}
+
+	public function testContentLength(): void
+	{
+		$response = $this->send('GET', '/length');
+
+		$this->assertSame(5, $response->getBody()->getSize());
+		$this->assertSame('Hello', (string) $response->getBody());
+	}
+
+	public function testDuplicateContentLengthIsCollapsed(): void
+	{
+		$response = $this->send('GET', '/duplicate-length');
+
+		$this->assertSame('2', $response->getHeaderLine('Content-Length'));
+		$this->assertSame('ok', (string) $response->getBody());
+	}
+
+	public function testTruncatedBodyIsIncomplete(): void
+	{
+		$body = $this->send('GET', '/truncated')->getBody();
+
+		$this->expectException(RuntimeException::class);
+		$this->expectExceptionMessage('Incomplete response body');
+
+		$body->getContents();
+	}
+
+	public function testCloseDelimitedBody(): void
+	{
+		$response = $this->send('GET', '/close-delimited');
+
+		$this->assertSame('1.0', $response->getProtocolVersion());
+		$this->assertNull($response->getBody()->getSize());
+		$this->assertSame('until close', (string) $response->getBody());
+	}
+
+	public function testHeaderParsing(): void
+	{
+		$response = $this->send('GET', '/headers');
+
+		$this->assertSame(404, $response->getStatusCode());
+		$this->assertSame('Not Found', $response->getReasonPhrase());
+		$this->assertSame('foo bar', $response->getHeaderLine('X-Folded'));
+		$this->assertSame(['a=1', 'b=2'], $response->getHeader('Set-Cookie'));
+		$this->assertTrue($response->hasHeader('X-Empty'));
+		$this->assertFalse($response->hasHeader('X-Ignored'));
+		$this->assertFalse($response->hasHeader('Bad Name'));
+	}
+
+	/**
+	 * @return iterable<string, array{string, string}>
+	 */
+	public static function invalidResponseProvider(): iterable
+	{
+		yield 'malformed status line' => ['/malformed', 'invalid status line'];
+		yield 'unsupported version' => ['/http2', 'invalid status line'];
+		yield 'incomplete head' => ['/incomplete-head', 'Connection closed'];
+		yield 'conflicting Content-Length' => ['/conflicting-length', 'invalid Content-Length'];
+		yield 'negative Content-Length' => ['/invalid-length', 'invalid Content-Length'];
+		yield 'overflowing Content-Length' => ['/overflow-length', 'invalid Content-Length'];
+		yield 'HTTP/1.0 with Transfer-Encoding' => ['/http10-chunked', 'Transfer-Encoding'];
+		yield 'protocol switch' => ['/switching', 'upgrades are not supported'];
+	}
+
+	#[DataProvider('invalidResponseProvider')]
+	public function testInvalidResponses(string $path, string $message): void
+	{
+		$this->expectException(NetworkException::class);
+		$this->expectExceptionMessage($message);
+
+		$this->send('GET', $path);
+	}
+
+	public function testReadTimeout(): void
+	{
+		$client = new Client(new ResponseFactory(), 0.2);
+
+		$this->expectException(NetworkException::class);
+		$this->expectExceptionMessage('Timed out');
+
+		$client->sendRequest($this->requestFactory->createRequest('GET', self::url('/slow')));
+	}
+
+	public function testConnectionRefused(): void
+	{
+		$socket = stream_socket_server('tcp://127.0.0.1:0');
+		$this->assertNotFalse($socket);
+		$address = (string) stream_socket_get_name($socket, false);
+		fclose($socket);
+
+		$this->expectException(NetworkException::class);
+		$this->expectExceptionMessage('Unable to connect');
+
+		$this->client->sendRequest($this->requestFactory->createRequest('GET', "http://$address/"));
+	}
+
+	/**
+	 * @return iterable<string, array{callable(RequestInterface): RequestInterface, string}>
+	 */
+	public static function invalidRequestProvider(): iterable
+	{
+		yield 'HTTP/2' => [
+			fn(RequestInterface $r) => $r->withProtocolVersion('2'),
+			'HTTP/2 is not supported',
+		];
+		yield 'CONNECT' => [
+			fn(RequestInterface $r) => $r->withMethod('CONNECT')->withRequestTarget('example.com:443'),
+			'is not supported',
+		];
+		yield 'upgrade' => [
+			fn(RequestInterface $r) => $r->withHeader('Upgrade', 'websocket'),
+			'upgrades are not supported',
+		];
+		yield 'Content-Length mismatch' => [
+			fn(RequestInterface $r) => $r->withHeader('Content-Length', '3'),
+			'Content-Length does not match',
+		];
+		yield 'unsupported Transfer-Encoding' => [
+			fn(RequestInterface $r) => $r->withHeader('Transfer-Encoding', 'gzip'),
+			'Transfer-Encoding must end with "chunked"',
+		];
+		yield 'chunked HTTP/1.0' => [
+			fn(RequestInterface $r) => $r->withHeader('Transfer-Encoding', 'chunked')->withProtocolVersion('1.0'),
+			'Transfer-Encoding requires HTTP/1.1',
+		];
+	}
+
+	/**
+	 * @param callable(RequestInterface): RequestInterface $modify
+	 */
+	#[DataProvider('invalidRequestProvider')]
+	public function testInvalidRequests(callable $modify, string $message): void
+	{
+		$request = $this->requestFactory->createRequest('POST', self::url('/echo'));
+		$request->getBody()->write('Hello');
+		$request = $modify($request);
+
+		try {
+			$this->client->sendRequest($request);
+			$this->fail('Expected a RequestException');
+		} catch (RequestException $e) {
+			$this->assertStringContainsString($message, $e->getMessage());
+			$this->assertSame($request->getMethod(), $e->getRequest()->getMethod());
+		}
+	}
+
+	public function testUnsupportedScheme(): void
+	{
+		$uri = $this->createStub(UriInterface::class);
+		$uri->method('getScheme')->willReturn('ftp');
+		$uri->method('getHost')->willReturn('localhost');
+
+		$request = $this->requestFactory->createRequest('GET', self::url('/'))->withUri($uri, true);
+
+		$this->expectException(RequestException::class);
+		$this->expectExceptionMessage('Scheme "ftp" is not supported');
+
+		$this->client->sendRequest($request);
+	}
+
+	public function testInvalidTimeout(): void
+	{
+		$this->expectException(InvalidArgumentException::class);
+
+		new Client(new ResponseFactory(), 0);
+	}
+
+	public function testInvalidBufferSize(): void
+	{
+		$this->expectException(InvalidArgumentException::class);
+
+		new Client(new ResponseFactory(), 1, [], 0);
+	}
+
+	private function send(string $method, string $path, string $body = ''): ResponseInterface
+	{
+		$request = $this->requestFactory->createRequest($method, self::url($path));
+
+		if ($body !== '') {
+			$request->getBody()->write($body);
+		}
+
+		return $this->client->sendRequest($request);
+	}
+
+	private function createUnknownSizeBody(string $contents): Stream
+	{
+		$resource = fopen('php://temp', 'r+b');
+		$this->assertNotFalse($resource);
+		fwrite($resource, $contents);
+		rewind($resource);
+
+		return new Stream($resource);
 	}
 }
