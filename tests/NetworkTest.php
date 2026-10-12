@@ -8,7 +8,10 @@ use HttpSoft\Message\RequestFactory;
 use HttpSoft\Message\ResponseFactory;
 use PHPUnit\Framework\Attributes\Group;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
 use Semperton\Proxy\Client;
+use Semperton\Proxy\Exception\NetworkException;
 
 use function explode;
 use function json_decode;
@@ -35,7 +38,7 @@ final class NetworkTest extends TestCase
 		$request = $this->requestFactory->createRequest('POST', 'https://httpbin.org/anything');
 		$request->getBody()->write('Hello World');
 
-		$response = $this->client->sendRequest($request);
+		$response = $this->send($request);
 
 		$this->assertSame(200, $response->getStatusCode());
 		$this->assertSame('application/json', $response->getHeaderLine('Content-Type'));
@@ -49,7 +52,8 @@ final class NetworkTest extends TestCase
 	{
 		$request = $this->requestFactory->createRequest('GET', 'https://httpbin.org/stream/5');
 
-		$response = $this->client->sendRequest($request);
+		$response = $this->send($request);
+		$this->assertSame(200, $response->getStatusCode());
 		$lines = explode("\n", trim($response->getBody()->getContents()));
 
 		$this->assertFalse($response->hasHeader('Transfer-Encoding'));
@@ -64,6 +68,30 @@ final class NetworkTest extends TestCase
 	{
 		$request = $this->requestFactory->createRequest('GET', 'https://httpbin.org/status/503');
 
-		$this->assertSame(503, $this->client->sendRequest($request)->getStatusCode());
+		try {
+			$response = $this->client->sendRequest($request);
+		} catch (NetworkException $e) {
+			$this->markTestSkipped('httpbin.org is unavailable: ' . $e->getMessage());
+		}
+
+		$this->assertSame(503, $response->getStatusCode());
+	}
+
+	/**
+	 * Skips the test instead of failing when the public service is down.
+	 */
+	private function send(RequestInterface $request): ResponseInterface
+	{
+		try {
+			$response = $this->client->sendRequest($request);
+		} catch (NetworkException $e) {
+			$this->markTestSkipped('httpbin.org is unavailable: ' . $e->getMessage());
+		}
+
+		if ($response->getStatusCode() >= 500) {
+			$this->markTestSkipped('httpbin.org is unavailable: HTTP ' . $response->getStatusCode());
+		}
+
+		return $response;
 	}
 }
