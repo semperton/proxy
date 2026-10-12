@@ -57,7 +57,7 @@ final class ClientTest extends TestCase
 
 		$this->assertStringContainsString("\r\nHost: 127.0.0.1:" . self::$port . "\r\n", $echo);
 		$this->assertStringContainsString("\r\nConnection: close\r\n", $echo);
-		$this->assertStringContainsString("\r\nUser-Agent: SempertonProxy/1.0", $echo);
+		$this->assertStringContainsString("\r\nUser-Agent: SempertonProxy (+https://github.com/semperton/proxy)\r\n", $echo);
 		$this->assertStringNotContainsString('Content-Length', $echo);
 	}
 

@@ -36,7 +36,7 @@ use function trim;
  */
 final class RequestWriter
 {
-	private const USER_AGENT = 'SempertonProxy/1.0 (+https://github.com/semperton/proxy)';
+	private const USER_AGENT = 'SempertonProxy (+https://github.com/semperton/proxy)';
 
 	private const SCHEMES = ['http' => true, 'https' => true];
 
