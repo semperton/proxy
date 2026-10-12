@@ -16,6 +16,7 @@ use RuntimeException;
 use Semperton\Proxy\Client;
 use Semperton\Proxy\Exception\NetworkException;
 use Semperton\Proxy\Exception\RequestException;
+use Semperton\Proxy\Internal\Connection;
 use Semperton\Proxy\Stream;
 
 use function fclose;
@@ -156,7 +157,7 @@ final class ClientTest extends TestCase
 		$body = $this->send('GET', '/chunked-truncated')->getBody();
 
 		$this->expectException(RuntimeException::class);
-		$this->expectExceptionMessage('Incomplete response body');
+		$this->expectExceptionMessage('closed prematurely');
 
 		$body->getContents();
 	}
@@ -210,7 +211,7 @@ final class ClientTest extends TestCase
 		$body = $this->send('GET', '/truncated')->getBody();
 
 		$this->expectException(RuntimeException::class);
-		$this->expectExceptionMessage('Incomplete response body');
+		$this->expectExceptionMessage('closed prematurely');
 
 		$body->getContents();
 	}
@@ -266,7 +267,7 @@ final class ClientTest extends TestCase
 		$client = new Client(new ResponseFactory(), 0.1);
 
 		$this->expectException(NetworkException::class);
-		$this->expectExceptionMessage('Timed out');
+		$this->expectExceptionMessage('timed out');
 
 		$client->sendRequest($this->requestFactory->createRequest('GET', self::url('/slow')));
 	}
@@ -383,6 +384,6 @@ final class ClientTest extends TestCase
 		fwrite($resource, $contents);
 		rewind($resource);
 
-		return new Stream($resource);
+		return new Stream(Connection::wrap($resource));
 	}
 }

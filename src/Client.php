@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Semperton\Proxy;
 
+use Generator;
 use InvalidArgumentException;
 use Override;
 use Psr\Http\Client\ClientExceptionInterface;
@@ -15,6 +16,7 @@ use Psr\Http\Message\StreamInterface;
 use RuntimeException;
 use Semperton\Proxy\Exception\NetworkException;
 use Semperton\Proxy\Exception\RequestException;
+use Semperton\Proxy\Internal\Connection;
 use Throwable;
 
 use function array_map;
@@ -23,14 +25,8 @@ use function array_unique;
 use function count;
 use function ctype_digit;
 use function end;
-use function error_clear_last;
-use function error_get_last;
 use function explode;
-use function fclose;
-use function feof;
-use function fgets;
 use function filter_var;
-use function fmod;
 use function fopen;
 use function ftell;
 use function fwrite;
@@ -41,16 +37,9 @@ use function parse_url;
 use function preg_match;
 use function reset;
 use function rewind;
-use function rtrim;
 use function sprintf;
-use function str_ends_with;
 use function str_replace;
 use function str_starts_with;
-use function stream_context_create;
-use function stream_get_meta_data;
-use function stream_set_timeout;
-use function stream_socket_client;
-use function stream_socket_enable_crypto;
 use function strlen;
 use function strpbrk;
 use function strpos;
@@ -59,8 +48,6 @@ use function substr;
 use function trim;
 
 use const FILTER_VALIDATE_INT;
-use const STREAM_CLIENT_CONNECT;
-use const STREAM_CRYPTO_METHOD_ANY_CLIENT;
 
 final class Client implements ClientInterface
 {
@@ -97,18 +84,21 @@ final class Client implements ClientInterface
 	public function sendRequest(RequestInterface $request): ResponseInterface
 	{
 		$request = $this->prepareRequest($request);
-		$socket = $this->connect($request);
+		$connection = null;
 
 		try {
-			$this->writeRequest($socket, $request);
+			[$host, $port, $tls] = $this->getEndpoint($request);
+			$connection = Connection::open($host, $port, $tls, $this->timeout, $this->contextOptions);
 
-			return $this->readResponse($socket, $request);
+			$this->writeRequest($connection, $request);
+
+			return $this->readResponse($connection, $request);
 		} catch (ClientExceptionInterface $e) {
-			fclose($socket);
+			$connection?->close();
 			throw $e;
 		} catch (Throwable $e) {
-			fclose($socket);
-			throw new NetworkException($request, $e->getMessage(), 0, $e);
+			$connection?->close();
+			throw new NetworkException($request, $e->getMessage(), (int) $e->getCode(), $e);
 		}
 	}
 
@@ -239,46 +229,16 @@ final class Client implements ClientInterface
 		$size = (int) ftell($buffer);
 		rewind($buffer);
 
-		return new Stream($buffer, $size, false, $this->bufferSize);
+		return new Stream(Connection::wrap($buffer), $size, false, $this->bufferSize);
 	}
 
 	/**
-	 * @return resource
+	 * @return array{string, int, bool} host, port, TLS
 	 */
-	private function connect(RequestInterface $request)
-	{
-		$address = $this->getRemoteAddress($request);
-		$context = stream_context_create($this->contextOptions);
-		$errorCode = 0;
-		$errorMessage = '';
-
-		$socket = @stream_socket_client($address, $errorCode, $errorMessage, $this->timeout, STREAM_CLIENT_CONNECT, $context);
-
-		if ($socket === false) {
-			throw new NetworkException($request, "Unable to connect to $address: $errorMessage", $errorCode);
-		}
-
-		stream_set_timeout($socket, (int) $this->timeout, (int) (fmod($this->timeout, 1.0) * 1e6));
-
-		if ($request->getUri()->getScheme() === 'https') {
-			$cryptoMethod = (int) ($this->contextOptions['ssl']['crypto_method'] ?? STREAM_CRYPTO_METHOD_ANY_CLIENT);
-
-			error_clear_last();
-
-			if (@stream_socket_enable_crypto($socket, true, $cryptoMethod) !== true) {
-				$error = error_get_last()['message'] ?? 'unknown error';
-				fclose($socket);
-
-				throw new NetworkException($request, "Unable to establish a TLS connection to $address: $error");
-			}
-		}
-
-		return $socket;
-	}
-
-	private function getRemoteAddress(RequestInterface $request): string
+	private function getEndpoint(RequestInterface $request): array
 	{
 		$uri = $request->getUri();
+		$scheme = $uri->getScheme() ?: 'http';
 		$host = $uri->getHost();
 		$port = $uri->getPort();
 
@@ -293,52 +253,51 @@ final class Client implements ClientInterface
 			throw new RequestException($request, 'Unable to determine the host of the request');
 		}
 
-		$port ??= self::DEFAULT_PORTS[$uri->getScheme() ?: 'http'];
+		return [$host, $port ?? self::DEFAULT_PORTS[$scheme], $scheme === 'https'];
+	}
 
-		return "tcp://$host:$port";
+	private function writeRequest(Connection $connection, RequestInterface $request): void
+	{
+		$head = $this->serializeHead($request);
+		$chunked = $request->hasHeader('Transfer-Encoding');
+		$buffer = $head;
+
+		// output is coalesced, so the head and a small body are sent in a single write
+		foreach ($this->readBody($request) as $data) {
+			$buffer .= $chunked ? sprintf("%x\r\n%s\r\n", strlen($data), $data) : $data;
+
+			if (strlen($buffer) >= $this->bufferSize) {
+				$connection->write($buffer);
+				$buffer = '';
+			}
+		}
+
+		$connection->write($chunked ? $buffer . "0\r\n\r\n" : $buffer);
 	}
 
 	/**
-	 * @param resource $socket
+	 * @return Generator<int, string>
 	 */
-	private function writeRequest($socket, RequestInterface $request): void
+	private function readBody(RequestInterface $request): Generator
 	{
-		$head = $this->serializeHead($request);
 		$body = $request->getBody();
-		$size = $body->getSize();
-		$chunked = $request->hasHeader('Transfer-Encoding');
+
+		if ($body->getSize() === 0) {
+			return;
+		}
 
 		try {
-			if ($size === 0) {
-				$this->write($socket, $request, $chunked ? $head . "0\r\n\r\n" : $head);
-				return;
-			}
-
 			if ($body->isSeekable()) {
 				$body->rewind();
 			}
-
-			// small bodies are sent together with the head in a single write
-			if (!$chunked && $size !== null && $size <= $this->bufferSize) {
-				$this->write($socket, $request, $head . $body->getContents());
-				return;
-			}
-
-			$this->write($socket, $request, $head);
 
 			while (!$body->eof()) {
 				$data = $body->read($this->bufferSize);
 
 				if ($data !== '') {
-					$this->write($socket, $request, $chunked ? sprintf("%x\r\n%s\r\n", strlen($data), $data) : $data);
+					yield $data;
 				}
 			}
-
-			if ($chunked) {
-				$this->write($socket, $request, "0\r\n\r\n");
-			}
-		} catch (NetworkException $e) {
-			throw $e;
 		} catch (Throwable $e) {
 			throw new RequestException($request, 'Unable to read the request body: ' . $e->getMessage(), 0, $e);
 		}
@@ -370,44 +329,15 @@ final class Client implements ClientInterface
 		return implode("\r\n", $lines) . "\r\n\r\n";
 	}
 
-	/**
-	 * Writes all bytes, fwrite() may only write a part of them.
-	 *
-	 * @param resource $socket
-	 */
-	private function write($socket, RequestInterface $request, string $data): void
-	{
-		$length = strlen($data);
-		$written = 0;
-
-		while ($written < $length) {
-			error_clear_last();
-			$result = @fwrite($socket, $written === 0 ? $data : substr($data, $written));
-
-			if ($result === false || $result === 0) {
-				$reason = stream_get_meta_data($socket)['timed_out']
-					? 'timed out'
-					: (error_get_last()['message'] ?? 'connection closed');
-
-				throw new NetworkException($request, "Unable to send the request: $reason");
-			}
-
-			$written += $result;
-		}
-	}
-
-	/**
-	 * @param resource $socket
-	 */
-	private function readResponse($socket, RequestInterface $request): ResponseInterface
+	private function readResponse(Connection $connection, RequestInterface $request): ResponseInterface
 	{
 		// interim 1xx responses are skipped (RFC 9110 §15.2)
 		do {
-			[$version, $status, $reason, $fields] = $this->readHead($socket, $request);
+			[$version, $status, $reason, $fields] = $this->readHead($connection);
 		} while ($status < 200 && $status !== 101);
 
 		if ($status === 101) {
-			throw new NetworkException($request, 'Unexpected protocol switch, upgrades are not supported');
+			throw new RuntimeException('Unexpected protocol switch, upgrades are not supported');
 		}
 
 		$response = $this->responseFactory
@@ -418,24 +348,23 @@ final class Client implements ClientInterface
 			$response = $response->withHeader($name, $values);
 		}
 
-		return $this->attachBody($socket, $request, $response);
+		return $this->attachBody($connection, $request, $response);
 	}
 
 	/**
-	 * @param resource $socket
 	 * @return array{string, int, string, array<string, list<string>>} version, status, reason, fields
 	 */
-	private function readHead($socket, RequestInterface $request): array
+	private function readHead(Connection $connection): array
 	{
-		$statusLine = $this->readLine($socket, $request);
+		$statusLine = $connection->readLine(self::MAX_LINE_LENGTH);
 
 		if (preg_match('#^HTTP/(1\.\d)[ \t]+([1-5]\d\d)(?:[ \t]+(.*))?$#', $statusLine, $match) !== 1) {
-			throw new NetworkException($request, 'Received an invalid status line');
+			throw new RuntimeException('Received an invalid status line');
 		}
 
 		$lines = [];
 
-		while (($line = $this->readLine($socket, $request)) !== '') {
+		while (($line = $connection->readLine(self::MAX_LINE_LENGTH)) !== '') {
 			if ($line[0] !== ' ' && $line[0] !== "\t") {
 				$lines[] = $line;
 			} elseif ($lines !== []) {
@@ -466,49 +395,25 @@ final class Client implements ClientInterface
 	}
 
 	/**
-	 * @param resource $socket
-	 */
-	private function readLine($socket, RequestInterface $request): string
-	{
-		$line = fgets($socket, self::MAX_LINE_LENGTH);
-
-		if ($line !== false && str_ends_with($line, "\n")) {
-			return rtrim($line, "\r\n");
-		}
-
-		if (stream_get_meta_data($socket)['timed_out']) {
-			throw new NetworkException($request, 'Timed out while reading the response');
-		}
-
-		if ($line === false || feof($socket)) {
-			throw new NetworkException($request, 'Connection closed before the response was received');
-		}
-
-		throw new NetworkException($request, 'Response header line exceeds ' . self::MAX_LINE_LENGTH . ' bytes');
-	}
-
-	/**
 	 * Determines the length of the response body (RFC 9112 §6.3).
-	 *
-	 * @param resource $socket
 	 */
-	private function attachBody($socket, RequestInterface $request, ResponseInterface $response): ResponseInterface
+	private function attachBody(Connection $connection, RequestInterface $request, ResponseInterface $response): ResponseInterface
 	{
 		$status = $response->getStatusCode();
 
 		if ($request->getMethod() === 'HEAD' || $status === 204 || $status === 304) {
-			return $response->withBody(new Stream($socket, 0, false, $this->bufferSize));
+			return $response->withBody(new Stream($connection, 0, false, $this->bufferSize));
 		}
 
 		if ($response->hasHeader('Transfer-Encoding')) {
 			if ($response->getProtocolVersion() === '1.0') {
-				throw new NetworkException($request, 'Received an HTTP/1.0 response with Transfer-Encoding');
+				throw new RuntimeException('Received an HTTP/1.0 response with Transfer-Encoding');
 			}
 
 			$codings = array_map('trim', explode(',', strtolower($response->getHeaderLine('Transfer-Encoding'))));
 
 			if (end($codings) !== 'chunked') {
-				return $response->withBody(new Stream($socket, null, false, $this->bufferSize));
+				return $response->withBody(new Stream($connection, null, false, $this->bufferSize));
 			}
 
 			// the chunked coding is removed while reading, keep the headers consistent (RFC 9112 §7.1.3)
@@ -519,22 +424,22 @@ final class Client implements ClientInterface
 
 			return $response
 				->withoutHeader('Content-Length')
-				->withBody(new Stream($socket, null, true, $this->bufferSize));
+				->withBody(new Stream($connection, null, true, $this->bufferSize));
 		}
 
 		if ($response->hasHeader('Content-Length')) {
 			$length = $this->parseContentLength($response->getHeaderLine('Content-Length'));
 
 			if ($length === null) {
-				throw new NetworkException($request, 'Received an invalid Content-Length');
+				throw new RuntimeException('Received an invalid Content-Length');
 			}
 
 			return $response
 				->withHeader('Content-Length', (string) $length)
-				->withBody(new Stream($socket, $length, false, $this->bufferSize));
+				->withBody(new Stream($connection, $length, false, $this->bufferSize));
 		}
 
-		return $response->withBody(new Stream($socket, null, false, $this->bufferSize));
+		return $response->withBody(new Stream($connection, null, false, $this->bufferSize));
 	}
 
 	/**

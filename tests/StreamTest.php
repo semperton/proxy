@@ -7,6 +7,7 @@ namespace Semperton\Proxy\Tests;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use RuntimeException;
+use Semperton\Proxy\Internal\Connection;
 use Semperton\Proxy\Stream;
 
 use function fopen;
@@ -46,7 +47,7 @@ final class StreamTest extends TestCase
 		$stream->read(5);
 
 		$this->expectException(RuntimeException::class);
-		$this->expectExceptionMessage('Incomplete response body');
+		$this->expectExceptionMessage('closed prematurely');
 
 		$stream->read(5);
 	}
@@ -98,8 +99,8 @@ final class StreamTest extends TestCase
 	 */
 	public static function invalidChunkedProvider(): iterable
 	{
-		yield 'missing last chunk' => ["3\r\nabc\r\n", 'Incomplete response body'];
-		yield 'truncated chunk' => ["5\r\nabc", 'Incomplete response body'];
+		yield 'missing last chunk' => ["3\r\nabc\r\n", 'closed prematurely'];
+		yield 'truncated chunk' => ["5\r\nabc", 'closed prematurely'];
 		yield 'invalid size' => ["xyz\r\nabc\r\n0\r\n\r\n", 'malformed chunk size'];
 		yield 'overflowing size' => ["fffffffffffffffff\r\n", 'chunk size too large'];
 		yield 'missing CRLF' => ["3\r\nabcdef\r\n0\r\n\r\n", 'missing CRLF'];
@@ -172,7 +173,7 @@ final class StreamTest extends TestCase
 	{
 		$resource = fopen('php://temp', 'r+b');
 		$this->assertNotFalse($resource);
-		$stream = new Stream($resource);
+		$stream = new Stream(Connection::wrap($resource));
 
 		$stream->close();
 		$stream->close();
@@ -191,6 +192,6 @@ final class StreamTest extends TestCase
 		fwrite($resource, $contents);
 		rewind($resource);
 
-		return new Stream($resource, $size, $chunked);
+		return new Stream(Connection::wrap($resource), $size, $chunked);
 	}
 }

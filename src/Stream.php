@@ -7,21 +7,13 @@ namespace Semperton\Proxy;
 use Override;
 use Psr\Http\Message\StreamInterface;
 use RuntimeException;
+use Semperton\Proxy\Internal\Connection;
 use Throwable;
 
-use function fclose;
-use function feof;
-use function fgets;
-use function fread;
 use function hexdec;
-use function is_resource;
 use function ltrim;
 use function min;
 use function preg_match;
-use function rtrim;
-use function str_ends_with;
-use function stream_get_contents;
-use function stream_get_meta_data;
 use function strlen;
 use function strpos;
 use function substr;
@@ -31,7 +23,7 @@ use const PHP_INT_SIZE;
 use const SEEK_SET;
 
 /**
- * Read-only body of a response, read directly from the socket.
+ * Read-only body of a response, read directly from the connection.
  *
  * The body is framed in one of three ways (RFC 9112 §6.3):
  * - sized: exactly $size bytes (Content-Length)
@@ -42,8 +34,7 @@ final class Stream implements StreamInterface
 {
 	private const MAX_LINE_LENGTH = 8192;
 
-	/** @var resource|null */
-	private $socket;
+	private ?Connection $connection;
 
 	private int $bytesRead = 0;
 
@@ -52,16 +43,15 @@ final class Stream implements StreamInterface
 	private bool $finished;
 
 	/**
-	 * @param resource $socket
 	 * @param int|null $size Body length in bytes, null if chunked or close-delimited
 	 */
 	public function __construct(
-		$socket,
+		Connection $connection,
 		private readonly ?int $size = null,
 		private readonly bool $chunked = false,
 		private readonly int $bufferSize = 8192,
 	) {
-		$this->socket = $socket;
+		$this->connection = $connection;
 		$this->finished = $size === 0;
 	}
 
@@ -82,33 +72,29 @@ final class Stream implements StreamInterface
 	#[Override]
 	public function close(): void
 	{
-		$socket = $this->socket;
-		$this->socket = null;
-
-		if (is_resource($socket)) {
-			fclose($socket);
-		}
+		$this->connection?->close();
+		$this->connection = null;
 	}
 
 	#[Override]
 	public function detach()
 	{
-		$socket = $this->socket;
-		$this->socket = null;
+		$resource = $this->connection?->detach();
+		$this->connection = null;
 
-		return $socket;
+		return $resource;
 	}
 
 	#[Override]
 	public function getSize(): ?int
 	{
-		return $this->socket === null ? null : $this->size;
+		return $this->connection === null ? null : $this->size;
 	}
 
 	#[Override]
 	public function tell(): int
 	{
-		$this->getSocket();
+		$this->connection();
 
 		return $this->bytesRead;
 	}
@@ -116,13 +102,13 @@ final class Stream implements StreamInterface
 	#[Override]
 	public function eof(): bool
 	{
-		$socket = $this->getSocket();
+		$connection = $this->connection();
 
 		if ($this->finished) {
 			return true;
 		}
 
-		return $this->size === null && !$this->chunked && feof($socket);
+		return $this->size === null && !$this->chunked && $connection->eof();
 	}
 
 	#[Override]
@@ -158,13 +144,13 @@ final class Stream implements StreamInterface
 	#[Override]
 	public function isReadable(): bool
 	{
-		return $this->socket !== null;
+		return $this->connection !== null;
 	}
 
 	#[Override]
 	public function read(int $length): string
 	{
-		$socket = $this->getSocket();
+		$connection = $this->connection();
 
 		if ($length < 0) {
 			throw new RuntimeException('Length must not be negative');
@@ -175,20 +161,20 @@ final class Stream implements StreamInterface
 		}
 
 		if ($this->chunked) {
-			return $this->readChunked($socket, $length);
+			return $this->readChunked($connection, $length);
 		}
 
 		if ($this->size === null) {
-			$data = $this->fread($socket, $length);
+			$data = $connection->read($length);
 			$this->bytesRead += strlen($data);
-			$this->finished = $data === '' && feof($socket);
+			$this->finished = $data === '';
 
 			return $data;
 		}
 
-		$data = $this->fread($socket, min($length, $this->size - $this->bytesRead));
+		$data = $connection->read(min($length, $this->size - $this->bytesRead));
 
-		if ($data === '' && feof($socket)) {
+		if ($data === '') {
 			throw $this->incomplete();
 		}
 
@@ -201,7 +187,7 @@ final class Stream implements StreamInterface
 	#[Override]
 	public function getContents(): string
 	{
-		$socket = $this->getSocket();
+		$connection = $this->connection();
 
 		if ($this->finished) {
 			return '';
@@ -211,20 +197,14 @@ final class Stream implements StreamInterface
 			$contents = '';
 
 			while (!$this->finished) {
-				$contents .= $this->readChunked($socket, $this->bufferSize);
+				$contents .= $this->readChunked($connection, $this->bufferSize);
 			}
 
 			return $contents;
 		}
 
 		$remaining = $this->size === null ? null : $this->size - $this->bytesRead;
-		$contents = stream_get_contents($socket, $remaining);
-
-		if ($contents === false) {
-			throw new RuntimeException('Unable to read from stream');
-		}
-
-		$this->assertNotTimedOut($socket);
+		$contents = $connection->readAll($remaining);
 		$this->bytesRead += strlen($contents);
 
 		if ($remaining !== null && strlen($contents) < $remaining) {
@@ -239,27 +219,24 @@ final class Stream implements StreamInterface
 	#[Override]
 	public function getMetadata(?string $key = null)
 	{
-		if ($this->socket === null) {
+		if ($this->connection === null) {
 			return $key === null ? [] : null;
 		}
 
-		$meta = stream_get_meta_data($this->socket);
+		$meta = $this->connection->metadata();
 
 		return $key === null ? $meta : ($meta[$key] ?? null);
 	}
 
-	/**
-	 * @param resource $socket
-	 */
-	private function readChunked($socket, int $length): string
+	private function readChunked(Connection $connection, int $length): string
 	{
 		if ($this->chunkRemaining === 0) {
-			$this->chunkRemaining = $this->readChunkSize($socket);
+			$this->chunkRemaining = $this->readChunkSize($connection);
 
 			if ($this->chunkRemaining === 0) {
 				// the trailer section is discarded (RFC 9112 §7.1.2)
 				do {
-					$trailer = $this->readLine($socket);
+					$trailer = $connection->readLine(self::MAX_LINE_LENGTH);
 				} while ($trailer !== '');
 
 				$this->finished = true;
@@ -268,28 +245,25 @@ final class Stream implements StreamInterface
 			}
 		}
 
-		$data = $this->fread($socket, min($length, $this->chunkRemaining));
+		$data = $connection->read(min($length, $this->chunkRemaining));
 
-		if ($data === '' && feof($socket)) {
+		if ($data === '') {
 			throw $this->incomplete();
 		}
 
 		$this->bytesRead += strlen($data);
 		$this->chunkRemaining -= strlen($data);
 
-		if ($this->chunkRemaining === 0 && $this->readLine($socket) !== '') {
+		if ($this->chunkRemaining === 0 && $connection->readLine(self::MAX_LINE_LENGTH) !== '') {
 			throw new RuntimeException('Invalid chunked transfer coding: missing CRLF after chunk data');
 		}
 
 		return $data;
 	}
 
-	/**
-	 * @param resource $socket
-	 */
-	private function readChunkSize($socket): int
+	private function readChunkSize(Connection $connection): int
 	{
-		$line = $this->readLine($socket);
+		$line = $connection->readLine(self::MAX_LINE_LENGTH);
 
 		// chunk extensions are ignored (RFC 9112 §7.1.1)
 		$extension = strpos($line, ';');
@@ -309,68 +283,17 @@ final class Stream implements StreamInterface
 		return $size === '' ? 0 : (int) hexdec($size);
 	}
 
-	/**
-	 * @param resource $socket
-	 */
-	private function readLine($socket): string
-	{
-		$line = fgets($socket, self::MAX_LINE_LENGTH);
-
-		if ($line !== false && str_ends_with($line, "\n")) {
-			return rtrim($line, "\r\n");
-		}
-
-		$this->assertNotTimedOut($socket);
-
-		if ($line === false || feof($socket)) {
-			throw $this->incomplete();
-		}
-
-		throw new RuntimeException('Invalid chunked transfer coding: line too long');
-	}
-
-	/**
-	 * @param resource $socket
-	 */
-	private function fread($socket, int $length): string
-	{
-		$data = fread($socket, $length);
-
-		if ($data === false) {
-			throw new RuntimeException('Unable to read from stream');
-		}
-
-		if ($data === '') {
-			$this->assertNotTimedOut($socket);
-		}
-
-		return $data;
-	}
-
-	/**
-	 * @param resource $socket
-	 */
-	private function assertNotTimedOut($socket): void
-	{
-		if (stream_get_meta_data($socket)['timed_out'] ?? false) {
-			throw new RuntimeException('Timed out while reading the response body');
-		}
-	}
-
 	private function incomplete(): RuntimeException
 	{
 		return new RuntimeException('Incomplete response body, the connection was closed prematurely');
 	}
 
-	/**
-	 * @return resource
-	 */
-	private function getSocket()
+	private function connection(): Connection
 	{
-		if ($this->socket === null) {
+		if ($this->connection === null) {
 			throw new RuntimeException('Stream is detached or closed');
 		}
 
-		return $this->socket;
+		return $this->connection;
 	}
 }
