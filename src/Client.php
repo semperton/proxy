@@ -18,6 +18,7 @@ use Semperton\Proxy\Internal\RequestWriter;
 use Semperton\Proxy\Internal\ResponseReader;
 use Throwable;
 
+use function function_exists;
 use function parse_url;
 
 /**
@@ -40,6 +41,7 @@ final class Client implements ClientInterface
 	 * @param int $bufferSize Number of bytes to read/write at once
 	 * @param float|null $maxDuration Seconds the whole exchange may take, including reading the response body
 	 * @param string|null $unixSocket Path of a Unix domain socket to connect to instead of the host of the request
+	 * @param bool $decodeContent Whether to request and decode gzip or deflate compressed responses
 	 */
 	public function __construct(
 		ResponseFactoryInterface $responseFactory,
@@ -48,6 +50,7 @@ final class Client implements ClientInterface
 		int $bufferSize = 8192,
 		private readonly ?float $maxDuration = null,
 		private readonly ?string $unixSocket = null,
+		bool $decodeContent = false,
 	) {
 		if ($timeout <= 0) {
 			throw new InvalidArgumentException('Timeout must be greater than zero');
@@ -65,8 +68,12 @@ final class Client implements ClientInterface
 			throw new InvalidArgumentException('Buffer size must be greater than zero');
 		}
 
-		$this->writer = new RequestWriter($bufferSize);
-		$this->reader = new ResponseReader($responseFactory, $bufferSize);
+		if ($decodeContent && !function_exists('inflate_init')) {
+			throw new InvalidArgumentException('Decoding content requires the zlib extension');
+		}
+
+		$this->writer = new RequestWriter($bufferSize, $decodeContent);
+		$this->reader = new ResponseReader($responseFactory, $bufferSize, $decodeContent);
 	}
 
 	#[Override]

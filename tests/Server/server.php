@@ -82,7 +82,27 @@ function clientIsGone($connection): bool
 	return @stream_select($read, $write, $except, 0) !== 0;
 }
 
+/**
+ * Builds a 200 response with a Content-Length.
+ */
+function respond(string $fields, string $body): string
+{
+	return "HTTP/1.1 200 OK\r\n{$fields}Content-Length: " . strlen($body) . "\r\n\r\n" . $body;
+}
+
+// compressed responses, the payload matches DecodingTest::PAYLOAD
+$payload = str_repeat('Hello compression! ', 2000);
+$gzip = (string) gzencode($payload);
+
 $responses = [
+	'/gzip' => respond("Content-Encoding: gzip\r\n", $gzip),
+	'/deflate' => respond("Content-Encoding: deflate\r\n", (string) gzcompress($payload)),
+	'/gzip-chunked' => "HTTP/1.1 200 OK\r\nContent-Encoding: x-gzip\r\nTransfer-Encoding: chunked\r\n\r\n"
+		. sprintf("%x\r\n%s\r\n", 100, substr($gzip, 0, 100))
+		. sprintf("%x\r\n%s\r\n0\r\n\r\n", strlen($gzip) - 100, substr($gzip, 100)),
+	'/gzip-truncated' => respond("Content-Encoding: gzip\r\n", substr($gzip, 0, -8)),
+	'/gzip-corrupt' => respond("Content-Encoding: gzip\r\n", 'definitely not gzip'),
+	'/brotli' => respond("Content-Encoding: br\r\n", 'raw brotli bytes'),
 	'/chunked' => "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 999\r\n\r\n"
 		. "5;name=value\r\nHello\r\n8\r\n, World!\r\n0\r\nX-Trailer: yes\r\n\r\n",
 	'/chunked-truncated' => "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nHello\r\n",

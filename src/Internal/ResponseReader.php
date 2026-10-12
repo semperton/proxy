@@ -22,6 +22,7 @@ use function ltrim;
 use function preg_match;
 use function reset;
 use function str_replace;
+use function strlen;
 use function strpos;
 use function strtolower;
 use function substr;
@@ -42,9 +43,13 @@ final class ResponseReader
 
 	private const MAX_INTERIM_RESPONSES = 10;
 
+	/** Content codings that are removed when decoding is enabled */
+	private const DECODABLE_CODINGS = ['gzip' => 'gzip', 'x-gzip' => 'gzip', 'deflate' => 'deflate'];
+
 	public function __construct(
 		private readonly ResponseFactoryInterface $responseFactory,
 		private readonly int $bufferSize,
+		private readonly bool $decodeContent,
 	) {}
 
 	/**
@@ -75,7 +80,28 @@ final class ResponseReader
 			$response = $response->withHeader($name, $values);
 		}
 
-		return $this->attachBody($connection, $request, $response);
+		$response = $this->attachBody($connection, $request, $response);
+
+		return $this->decodeContent ? $this->decodeBody($response) : $response;
+	}
+
+	/**
+	 * Removes a single gzip or deflate content coding, and adjusts the fields to match (PSR-18).
+	 */
+	private function decodeBody(ResponseInterface $response): ResponseInterface
+	{
+		$coding = strtolower(trim($response->getHeaderLine('Content-Encoding')));
+		$body = $response->getBody();
+
+		// other or stacked codings are left as they are, as are responses without content
+		if (!isset(self::DECODABLE_CODINGS[$coding]) || $body->getSize() === 0) {
+			return $response;
+		}
+
+		return $response
+			->withoutHeader('Content-Encoding')
+			->withoutHeader('Content-Length')
+			->withBody(new DecodedBody($body, self::DECODABLE_CODINGS[$coding], $this->bufferSize));
 	}
 
 	/**

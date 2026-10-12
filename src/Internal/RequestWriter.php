@@ -45,6 +45,7 @@ final class RequestWriter
 
 	public function __construct(
 		private readonly int $bufferSize,
+		private readonly bool $decodeContent,
 	) {}
 
 	/**
@@ -88,6 +89,11 @@ final class RequestWriter
 
 			$port = $uri->getPort();
 			$request = $request->withHeader('Host', $uri->getHost() . ($port === null ? '' : ":$port"));
+		}
+
+		// a caller's own Accept-Encoding is kept, only gzip and deflate responses are decoded
+		if ($this->decodeContent && !$request->hasHeader('Accept-Encoding')) {
+			$request = $request->withHeader('Accept-Encoding', 'gzip, deflate');
 		}
 
 		if (!$request->hasHeader('User-Agent')) {
