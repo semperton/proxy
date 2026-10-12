@@ -35,18 +35,24 @@ final class Client implements ClientInterface
 	private readonly ResponseReader $reader;
 
 	/**
-	 * @param float $timeout Connect and read/write timeout in seconds
+	 * @param float $timeout Seconds to wait for the connection or the server before giving up (idle timeout)
 	 * @param array<string, array<string, mixed>> $contextOptions Stream context options, see https://www.php.net/manual/en/context.php
 	 * @param int $bufferSize Number of bytes to read/write at once
+	 * @param float|null $maxDuration Seconds the whole exchange may take, including reading the response body
 	 */
 	public function __construct(
 		ResponseFactoryInterface $responseFactory,
 		private readonly float $timeout = 10,
 		private readonly array $contextOptions = [],
 		int $bufferSize = 8192,
+		private readonly ?float $maxDuration = null,
 	) {
 		if ($timeout <= 0) {
 			throw new InvalidArgumentException('Timeout must be greater than zero');
+		}
+
+		if ($maxDuration !== null && $maxDuration <= 0) {
+			throw new InvalidArgumentException('Maximum duration must be greater than zero');
 		}
 
 		if ($bufferSize < 1) {
@@ -64,8 +70,8 @@ final class Client implements ClientInterface
 		$connection = null;
 
 		try {
-			[$host, $port, $tls] = $this->getEndpoint($request);
-			$connection = Connection::open($host, $port, $tls, $this->timeout, $this->contextOptions);
+			[$address, $tls] = $this->getEndpoint($request);
+			$connection = Connection::open($address, $tls, $this->timeout, $this->maxDuration, $this->contextOptions);
 
 			$this->writer->write($connection, $request);
 
@@ -80,7 +86,7 @@ final class Client implements ClientInterface
 	}
 
 	/**
-	 * @return array{string, int, bool} host, port, TLS
+	 * @return array{string, bool} socket address, TLS
 	 */
 	private function getEndpoint(RequestInterface $request): array
 	{
@@ -100,6 +106,8 @@ final class Client implements ClientInterface
 			throw new RequestException($request, 'Unable to determine the host of the request');
 		}
 
-		return [$host, $port ?? self::DEFAULT_PORTS[$scheme], $scheme === 'https'];
+		$port ??= self::DEFAULT_PORTS[$scheme];
+
+		return ["tcp://$host:$port", $scheme === 'https'];
 	}
 }

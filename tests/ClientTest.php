@@ -19,6 +19,7 @@ use Semperton\Proxy\Exception\RequestException;
 use Semperton\Proxy\Tests\Fixture\UnknownSizeStream;
 
 use function fclose;
+use function microtime;
 use function str_repeat;
 use function stream_socket_get_name;
 use function stream_socket_server;
@@ -346,6 +347,40 @@ final class ClientTest extends TestCase
 		$client->sendRequest($this->requestFactory->createRequest('GET', self::url('/slow')));
 	}
 
+	public function testMaxDurationLimitsSlowHead(): void
+	{
+		$client = new Client(new ResponseFactory(), 1, maxDuration: 0.2);
+		$start = microtime(true);
+
+		try {
+			$client->sendRequest($this->requestFactory->createRequest('GET', self::url('/drip-head')));
+			$this->fail('Expected a NetworkException');
+		} catch (NetworkException $e) {
+			$this->assertStringContainsString('maximum duration', $e->getMessage());
+		}
+
+		$this->assertLessThan(0.4, microtime(true) - $start);
+	}
+
+	public function testMaxDurationIncludesReadingTheBody(): void
+	{
+		$client = new Client(new ResponseFactory(), 1, maxDuration: 0.2);
+		$body = $client->sendRequest($this->requestFactory->createRequest('GET', self::url('/drip')))->getBody();
+
+		$this->expectException(RuntimeException::class);
+		$this->expectExceptionMessage('maximum duration');
+
+		$body->getContents();
+	}
+
+	public function testSlowResponseWithoutMaxDuration(): void
+	{
+		$client = new Client(new ResponseFactory(), 1);
+		$response = $client->sendRequest($this->requestFactory->createRequest('GET', self::url('/drip')));
+
+		$this->assertSame(str_repeat('x', 20), $response->getBody()->getContents());
+	}
+
 	public function testConnectionRefused(): void
 	{
 		$socket = stream_socket_server('tcp://127.0.0.1:0');
@@ -431,6 +466,13 @@ final class ClientTest extends TestCase
 		$this->expectException(InvalidArgumentException::class);
 
 		new Client(new ResponseFactory(), 0);
+	}
+
+	public function testInvalidMaxDuration(): void
+	{
+		$this->expectException(InvalidArgumentException::class);
+
+		new Client(new ResponseFactory(), maxDuration: 0);
 	}
 
 	public function testInvalidBufferSize(): void

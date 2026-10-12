@@ -11,10 +11,12 @@ use Semperton\Proxy\Internal\Connection;
 use function fclose;
 use function fwrite;
 use function is_resource;
+use function microtime;
 use function str_repeat;
 use function stream_get_contents;
 use function stream_set_timeout;
 use function stream_socket_pair;
+use function usleep;
 
 use const STREAM_IPPROTO_IP;
 use const STREAM_PF_UNIX;
@@ -105,6 +107,41 @@ final class ConnectionTest extends TestCase
 		$this->connection->readAll(10);
 	}
 
+	public function testExpiredMaxDuration(): void
+	{
+		$connection = Connection::wrap($this->local, 5, 0.000001);
+		usleep(1000);
+
+		$this->expectException(RuntimeException::class);
+		$this->expectExceptionMessage('maximum duration');
+
+		$connection->read(1);
+	}
+
+	public function testMaxDurationWinsOverIdleTimeout(): void
+	{
+		$connection = Connection::wrap($this->local, 5, 0.1);
+		$start = microtime(true);
+
+		try {
+			$connection->readLine(100);
+			$this->fail('Expected a RuntimeException');
+		} catch (RuntimeException $e) {
+			$this->assertStringContainsString('maximum duration', $e->getMessage());
+		}
+
+		$this->assertLessThan(1, microtime(true) - $start);
+	}
+
+	public function testReadLineAcrossReads(): void
+	{
+		fwrite($this->remote, 'first part, ');
+		fwrite($this->remote, "second part\r\nnext");
+
+		$this->assertSame('first part, second part', $this->connection->readLine(100));
+		$this->assertSame('next', $this->connection->read(100));
+	}
+
 	public function testReadUntilEnd(): void
 	{
 		fwrite($this->remote, 'Hello World');
@@ -162,6 +199,6 @@ final class ConnectionTest extends TestCase
 		$this->expectException(RuntimeException::class);
 		$this->expectExceptionMessage('Unable to connect to tcp://127.0.0.1:1');
 
-		Connection::open('127.0.0.1', 1, false, 1, []);
+		Connection::open('tcp://127.0.0.1:1', false, 1, null, []);
 	}
 }

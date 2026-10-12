@@ -57,6 +57,19 @@ function readRequest($connection): array
 	return [$method, $path, $head . $body];
 }
 
+/**
+ * The client sends nothing after its request, so a readable connection means it was closed.
+ *
+ * @param resource $connection
+ */
+function clientIsGone($connection): bool
+{
+	$read = [$connection];
+	$write = $except = null;
+
+	return @stream_select($read, $write, $except, 0) !== 0;
+}
+
 $responses = [
 	'/chunked' => "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 999\r\n\r\n"
 		. "5;name=value\r\nHello\r\n8\r\n, World!\r\n0\r\nX-Trailer: yes\r\n\r\n",
@@ -96,8 +109,24 @@ while (true) {
 
 	[$method, $path, $request] = readRequest($connection);
 
-	if ($path === '/slow') {
-		usleep(500_000);
+	// waits up to 0.5 s before answering, or until the client gives up
+	for ($i = 0; $path === '/slow' && $i < 10 && !clientIsGone($connection); $i++) {
+		usleep(50_000);
+	}
+
+	// sends one byte every 25 ms, within any idle timeout, for 0.5 s in total
+	if ($path === '/drip' || $path === '/drip-head') {
+		@fwrite($connection, $path === '/drip' ? "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\n" : "HTTP/1.1 200 OK\r\nX-Slow: ");
+
+		// stops early when the client has given up, so the next test is not delayed
+		for ($i = 0; $i < 20 && !clientIsGone($connection) && @fwrite($connection, 'x') !== false; $i++) {
+			usleep(25_000);
+		}
+
+		@fwrite($connection, $path === '/drip' ? '' : "\r\nContent-Length: 0\r\n\r\n");
+		fclose($connection);
+
+		continue;
 	}
 
 	$response = $responses[$path]

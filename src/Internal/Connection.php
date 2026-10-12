@@ -10,20 +10,21 @@ use function error_clear_last;
 use function error_get_last;
 use function fclose;
 use function feof;
-use function fgets;
 use function fmod;
 use function fread;
 use function fwrite;
+use function hrtime;
 use function is_resource;
+use function max;
+use function min;
 use function rtrim;
-use function str_ends_with;
 use function stream_context_create;
-use function stream_get_contents;
 use function stream_get_meta_data;
 use function stream_set_timeout;
 use function stream_socket_client;
 use function stream_socket_enable_crypto;
 use function strlen;
+use function strpos;
 use function substr;
 
 use const STREAM_CLIENT_CONNECT;
@@ -32,19 +33,38 @@ use const STREAM_CRYPTO_METHOD_ANY_CLIENT;
 /**
  * Blocking stream with timeouts, used for a single request/response exchange.
  *
+ * Every read is a single fread() call with its own timeout, so that an optional deadline holds
+ * even against a server that sends data very slowly. Data is read ahead into a buffer to find
+ * line endings, which means a detached resource does not include data that was already buffered.
+ *
  * @internal
  */
 final class Connection
 {
+	private const CHUNK_SIZE = 8192;
+
 	/** @var resource|null */
 	private $resource;
 
+	private string $buffer = '';
+
+	private readonly ?float $deadline;
+
+	/** Whether the timeout of the current operation is limited by the deadline */
+	private bool $deadlineArmed = false;
+
 	/**
 	 * @param resource $resource
+	 * @param float|null $timeout Idle timeout in seconds, null to keep the stream's timeout
+	 * @param float|null $maxDuration Time in seconds the connection may be used for, null for no limit
 	 */
-	private function __construct($resource)
-	{
+	private function __construct(
+		$resource,
+		private readonly ?float $timeout,
+		?float $maxDuration,
+	) {
 		$this->resource = $resource;
+		$this->deadline = $maxDuration === null ? null : self::now() + $maxDuration;
 	}
 
 	public function __destruct()
@@ -53,35 +73,26 @@ final class Connection
 	}
 
 	/**
+	 * @param string $address Socket address, e.g. "tcp://example.com:80" or "unix:///path/to/socket"
 	 * @param array<string, array<string, mixed>> $contextOptions
 	 */
-	public static function open(string $host, int $port, bool $tls, float $timeout, array $contextOptions): self
+	public static function open(string $address, bool $tls, float $timeout, ?float $maxDuration, array $contextOptions): self
 	{
-		$address = "tcp://$host:$port";
+		$connectTimeout = $maxDuration === null ? $timeout : min($timeout, $maxDuration);
 		$context = stream_context_create($contextOptions);
 		$errorCode = 0;
 		$errorMessage = '';
 
-		$resource = @stream_socket_client($address, $errorCode, $errorMessage, $timeout, STREAM_CLIENT_CONNECT, $context);
+		$resource = @stream_socket_client($address, $errorCode, $errorMessage, $connectTimeout, STREAM_CLIENT_CONNECT, $context);
 
 		if ($resource === false) {
 			throw new RuntimeException("Unable to connect to $address: $errorMessage", $errorCode);
 		}
 
-		stream_set_timeout($resource, (int) $timeout, (int) (fmod($timeout, 1.0) * 1e6));
-		$connection = new self($resource);
+		$connection = new self($resource, $timeout, $maxDuration);
 
 		if ($tls) {
-			$cryptoMethod = (int) ($contextOptions['ssl']['crypto_method'] ?? STREAM_CRYPTO_METHOD_ANY_CLIENT);
-
-			error_clear_last();
-
-			if (@stream_socket_enable_crypto($resource, true, $cryptoMethod) !== true) {
-				$connection->close();
-				$error = error_get_last()['message'] ?? 'unknown error';
-
-				throw new RuntimeException("Unable to establish a TLS connection to $address: $error");
-			}
+			$connection->enableTls($address, (int) ($contextOptions['ssl']['crypto_method'] ?? STREAM_CRYPTO_METHOD_ANY_CLIENT));
 		}
 
 		return $connection;
@@ -90,9 +101,9 @@ final class Connection
 	/**
 	 * @param resource $resource
 	 */
-	public static function wrap($resource): self
+	public static function wrap($resource, ?float $timeout = null, ?float $maxDuration = null): self
 	{
-		return new self($resource);
+		return new self($resource, $timeout, $maxDuration);
 	}
 
 	/**
@@ -105,6 +116,7 @@ final class Connection
 		$written = 0;
 
 		while ($written < $length) {
+			$this->armTimeout($resource);
 			error_clear_last();
 			$result = @fwrite($resource, $written === 0 ? $data : substr($data, $written));
 
@@ -123,16 +135,16 @@ final class Connection
 	 */
 	public function read(int $length): string
 	{
-		$resource = $this->resource();
-		$data = fread($resource, $length);
-
-		if ($data === false || $data === '') {
-			$this->assertNotTimedOut($resource);
+		if ($length < 1) {
+			return '';
 		}
 
-		if ($data === false) {
-			throw new RuntimeException('Unable to read');
+		if ($this->buffer === '') {
+			return $this->fread($length);
 		}
+
+		$data = substr($this->buffer, 0, $length);
+		$this->buffer = substr($this->buffer, strlen($data));
 
 		return $data;
 	}
@@ -142,12 +154,16 @@ final class Connection
 	 */
 	public function readAll(?int $length = null): string
 	{
-		$resource = $this->resource();
-		$data = stream_get_contents($resource, $length);
-		$this->assertNotTimedOut($resource);
+		$data = $this->read($length ?? self::CHUNK_SIZE);
 
-		if ($data === false) {
-			throw new RuntimeException('Unable to read');
+		while ($data !== '' && ($length === null || strlen($data) < $length)) {
+			$chunk = $this->fread($length === null ? self::CHUNK_SIZE : min(self::CHUNK_SIZE, $length - strlen($data)));
+
+			if ($chunk === '') {
+				break;
+			}
+
+			$data .= $chunk;
 		}
 
 		return $data;
@@ -159,25 +175,38 @@ final class Connection
 	 */
 	public function readLine(int $maxLength): string
 	{
-		$resource = $this->resource();
-		$line = fgets($resource, $maxLength + 1);
+		$end = strpos($this->buffer, "\n");
 
-		if ($line !== false && str_ends_with($line, "\n")) {
-			return rtrim($line, "\r\n");
+		while ($end === false) {
+			$searched = strlen($this->buffer);
+
+			if ($searched >= $maxLength) {
+				throw new RuntimeException("Line exceeds $maxLength bytes");
+			}
+
+			$data = $this->fread(self::CHUNK_SIZE);
+
+			if ($data === '') {
+				throw new RuntimeException('Connection closed prematurely');
+			}
+
+			$this->buffer .= $data;
+			$end = strpos($this->buffer, "\n", $searched);
 		}
 
-		$this->assertNotTimedOut($resource);
-
-		if ($line === false || feof($resource)) {
-			throw new RuntimeException('Connection closed prematurely');
+		if ($end >= $maxLength) {
+			throw new RuntimeException("Line exceeds $maxLength bytes");
 		}
 
-		throw new RuntimeException("Line exceeds $maxLength bytes");
+		$line = substr($this->buffer, 0, $end);
+		$this->buffer = substr($this->buffer, $end + 1);
+
+		return rtrim($line, "\r");
 	}
 
 	public function eof(): bool
 	{
-		return feof($this->resource());
+		return $this->buffer === '' && feof($this->resource());
 	}
 
 	/**
@@ -195,6 +224,7 @@ final class Connection
 	{
 		$resource = $this->resource;
 		$this->resource = null;
+		$this->buffer = '';
 
 		return $resource;
 	}
@@ -208,6 +238,86 @@ final class Connection
 		}
 	}
 
+	private static function now(): float
+	{
+		return (float) hrtime(true) / 1e9;
+	}
+
+	private function enableTls(string $address, int $cryptoMethod): void
+	{
+		$resource = $this->resource();
+		$this->armTimeout($resource);
+		error_clear_last();
+
+		if (@stream_socket_enable_crypto($resource, true, $cryptoMethod) !== true) {
+			$this->assertNotTimedOut($resource);
+			$this->close();
+			$error = error_get_last()['message'] ?? 'unknown error';
+
+			throw new RuntimeException("Unable to establish a TLS connection to $address: $error");
+		}
+	}
+
+	private function fread(int $length): string
+	{
+		$resource = $this->resource();
+		$this->armTimeout($resource);
+		$data = fread($resource, $length);
+
+		if ($data === false || $data === '') {
+			$this->assertNotTimedOut($resource);
+		}
+
+		if ($data === false) {
+			throw new RuntimeException('Unable to read');
+		}
+
+		return $data;
+	}
+
+	/**
+	 * Limits the next blocking operation to the idle timeout and the remaining time.
+	 *
+	 * @param resource $resource
+	 */
+	private function armTimeout($resource): void
+	{
+		$timeout = $this->timeout;
+
+		if ($this->deadline !== null) {
+			$remaining = $this->deadline - self::now();
+
+			if ($remaining <= 0) {
+				throw new RuntimeException('Request exceeded the maximum duration');
+			}
+
+			$this->deadlineArmed = $timeout === null || $remaining <= $timeout;
+			$timeout = $this->deadlineArmed ? $remaining : $timeout;
+		}
+
+		if ($timeout !== null) {
+			// a zero timeout would mean "do not wait at all"
+			$timeout = max($timeout, 0.000001);
+			stream_set_timeout($resource, (int) $timeout, (int) (fmod($timeout, 1.0) * 1e6));
+		}
+	}
+
+	/**
+	 * @param resource $resource
+	 */
+	private function assertNotTimedOut($resource): void
+	{
+		if (!(stream_get_meta_data($resource)['timed_out'] ?? false)) {
+			return;
+		}
+
+		if ($this->deadlineArmed) {
+			throw new RuntimeException('Request exceeded the maximum duration');
+		}
+
+		throw new RuntimeException('Connection timed out');
+	}
+
 	/**
 	 * @return resource
 	 */
@@ -218,15 +328,5 @@ final class Connection
 		}
 
 		return $this->resource;
-	}
-
-	/**
-	 * @param resource $resource
-	 */
-	private function assertNotTimedOut($resource): void
-	{
-		if (stream_get_meta_data($resource)['timed_out'] ?? false) {
-			throw new RuntimeException('Connection timed out');
-		}
 	}
 }
