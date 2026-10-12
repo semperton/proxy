@@ -116,9 +116,18 @@ final class RequestWriter
 		}
 
 		$buffer = $this->serializeHead($request);
+		$length = $chunked ? null : (int) $request->getHeaderLine('Content-Length');
+		$written = 0;
 
 		// output is coalesced, so the head and a small body are sent in a single write
 		foreach ($chunks as $data) {
+			$written += strlen($data);
+
+			// a body that does not match its Content-Length would corrupt the message framing
+			if ($length !== null && $written > $length) {
+				throw $this->lengthMismatch($request);
+			}
+
 			$buffer .= $chunked ? sprintf("%x\r\n%s\r\n", strlen($data), $data) : $data;
 
 			if (strlen($buffer) >= $this->bufferSize) {
@@ -127,7 +136,16 @@ final class RequestWriter
 			}
 		}
 
+		if ($length !== null && $written < $length) {
+			throw $this->lengthMismatch($request);
+		}
+
 		$connection->write($chunked ? $buffer . "0\r\n\r\n" : $buffer);
+	}
+
+	private function lengthMismatch(RequestInterface $request): RequestException
+	{
+		return new RequestException($request, 'Content-Length does not match the size of the request body');
 	}
 
 	/**
@@ -161,7 +179,7 @@ final class RequestWriter
 			$length = $request->getHeaderLine('Content-Length');
 
 			if (!ctype_digit($length) || ($size !== null && (int) $length !== $size)) {
-				throw new RequestException($request, 'Content-Length does not match the size of the request body');
+				throw $this->lengthMismatch($request);
 			}
 
 			return $request;

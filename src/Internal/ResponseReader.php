@@ -38,6 +38,10 @@ final class ResponseReader
 {
 	private const MAX_LINE_LENGTH = 65536;
 
+	private const MAX_HEAD_SIZE = 262144;
+
+	private const MAX_INTERIM_RESPONSES = 10;
+
 	public function __construct(
 		private readonly ResponseFactoryInterface $responseFactory,
 		private readonly int $bufferSize,
@@ -49,7 +53,13 @@ final class ResponseReader
 	public function read(Connection $connection, RequestInterface $request): ResponseInterface
 	{
 		// interim 1xx responses are skipped (RFC 9110 §15.2)
+		$interim = 0;
+
 		do {
+			if ($interim++ > self::MAX_INTERIM_RESPONSES) {
+				throw new RuntimeException('Received more than ' . self::MAX_INTERIM_RESPONSES . ' interim responses');
+			}
+
 			[$version, $status, $reason, $fields] = $this->readHead($connection);
 		} while ($status < 200 && $status !== 101);
 
@@ -80,8 +90,15 @@ final class ResponseReader
 		}
 
 		$lines = [];
+		$headSize = strlen($statusLine);
 
 		while (($line = $connection->readLine(self::MAX_LINE_LENGTH)) !== '') {
+			$headSize += strlen($line);
+
+			if ($headSize > self::MAX_HEAD_SIZE) {
+				throw new RuntimeException('Response head exceeds ' . self::MAX_HEAD_SIZE . ' bytes');
+			}
+
 			if ($line[0] !== ' ' && $line[0] !== "\t") {
 				$lines[] = $line;
 			} elseif ($lines !== []) {

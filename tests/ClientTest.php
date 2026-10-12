@@ -177,6 +177,34 @@ final class ClientTest extends TestCase
 		yield '304 Not Modified' => ['GET', '/not-modified'];
 	}
 
+	public function testMaximumInterimResponses(): void
+	{
+		$this->assertSame('ok', $this->send('GET', '/interim-max')->getBody()->getContents());
+	}
+
+	/**
+	 * @return iterable<string, array{string}>
+	 */
+	public static function contentLengthMismatchProvider(): iterable
+	{
+		yield 'body too long' => ['3'];
+		yield 'body too short' => ['10'];
+	}
+
+	#[DataProvider('contentLengthMismatchProvider')]
+	public function testContentLengthMismatchOfUnknownSizeBody(string $length): void
+	{
+		$request = $this->requestFactory
+			->createRequest('POST', self::url('/echo'))
+			->withHeader('Content-Length', $length)
+			->withBody(new UnknownSizeStream('Hello'));
+
+		$this->expectException(RequestException::class);
+		$this->expectExceptionMessage('Content-Length does not match');
+
+		$this->client->sendRequest($request);
+	}
+
 	#[DataProvider('bodilessResponseProvider')]
 	public function testResponsesWithoutBody(string $method, string $path): void
 	{
@@ -247,6 +275,8 @@ final class ClientTest extends TestCase
 		yield 'overflowing Content-Length' => ['/overflow-length', 'invalid Content-Length'];
 		yield 'HTTP/1.0 with Transfer-Encoding' => ['/http10-chunked', 'Transfer-Encoding'];
 		yield 'protocol switch' => ['/switching', 'upgrades are not supported'];
+		yield 'too many interim responses' => ['/interim-flood', 'more than 10 interim responses'];
+		yield 'oversized head' => ['/huge-head', 'Response head exceeds'];
 	}
 
 	#[DataProvider('invalidResponseProvider')]

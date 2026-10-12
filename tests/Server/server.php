@@ -60,6 +60,9 @@ $responses = [
 	'/http10-chunked' => "HTTP/1.0 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
 	'/interim' => "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </style.css>\r\n\r\n"
 		. "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+	'/interim-max' => str_repeat("HTTP/1.1 100 Continue\r\n\r\n", 10) . "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+	'/interim-flood' => str_repeat("HTTP/1.1 100 Continue\r\n\r\n", 11) . "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+	'/huge-head' => "HTTP/1.1 200 OK\r\n" . str_repeat('X-Filler: ' . str_repeat('a', 1000) . "\r\n", 300) . "\r\n",
 	'/switching' => "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n",
 	// bodiless responses are followed by junk that a correct client never reads
 	'/no-content' => "HTTP/1.1 204 No Content\r\n\r\nIGNORED",
