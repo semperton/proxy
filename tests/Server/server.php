@@ -61,8 +61,9 @@ $responses = [
 	'/interim' => "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </style.css>\r\n\r\n"
 		. "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
 	'/switching' => "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n",
-	'/no-content' => "HTTP/1.1 204 No Content\r\n\r\n",
-	'/not-modified' => "HTTP/1.1 304 Not Modified\r\nContent-Length: 10\r\n\r\n",
+	// bodiless responses are followed by junk that a correct client never reads
+	'/no-content' => "HTTP/1.1 204 No Content\r\n\r\nIGNORED",
+	'/not-modified' => "HTTP/1.1 304 Not Modified\r\nContent-Length: 10\r\n\r\nIGNORED",
 	'/length' => "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nHello",
 	'/duplicate-length' => "HTTP/1.1 200 OK\r\nContent-Length: 2, 2\r\n\r\nok",
 	'/conflicting-length' => "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\nok",
@@ -87,7 +88,7 @@ while (true) {
 	[$method, $path, $request] = readRequest($connection);
 
 	if ($path === '/slow') {
-		sleep(1);
+		usleep(500_000);
 	}
 
 	$response = $responses[$path]

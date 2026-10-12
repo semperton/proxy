@@ -41,7 +41,7 @@ final class NetworkTest extends TestCase
 		$this->assertSame('application/json', $response->getHeaderLine('Content-Type'));
 
 		/** @var array{data: string} $body */
-		$body = json_decode((string) $response->getBody(), true);
+		$body = json_decode($response->getBody()->getContents(), true);
 		$this->assertSame('Hello World', $body['data']);
 	}
 
@@ -50,7 +50,7 @@ final class NetworkTest extends TestCase
 		$request = $this->requestFactory->createRequest('GET', 'https://httpbin.org/stream/5');
 
 		$response = $this->client->sendRequest($request);
-		$lines = explode("\n", trim((string) $response->getBody()));
+		$lines = explode("\n", trim($response->getBody()->getContents()));
 
 		$this->assertFalse($response->hasHeader('Transfer-Encoding'));
 		$this->assertCount(5, $lines);

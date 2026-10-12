@@ -49,14 +49,14 @@ final class ClientTest extends TestCase
 		$this->assertSame('1.1', $response->getProtocolVersion());
 		$this->assertStringStartsWith(
 			"GET /echo?foo=bar HTTP/1.1\r\nHost: 127.0.0.1:$port\r\n",
-			(string) $response->getBody(),
+			$response->getBody()->getContents(),
 		);
 	}
 
 	public function testRequiredHeadersAreSent(): void
 	{
 		$request = $this->requestFactory->createRequest('GET', self::url('/echo'))->withoutHeader('Host');
-		$echo = (string) $this->client->sendRequest($request)->getBody();
+		$echo = $this->client->sendRequest($request)->getBody()->getContents();
 
 		$this->assertStringContainsString("\r\nHost: 127.0.0.1:" . self::$port . "\r\n", $echo);
 		$this->assertStringContainsString("\r\nConnection: close\r\n", $echo);
@@ -67,7 +67,7 @@ final class ClientTest extends TestCase
 	public function testCustomUserAgentIsKept(): void
 	{
 		$request = $this->requestFactory->createRequest('GET', self::url('/echo'))->withHeader('User-Agent', 'Custom/1.0');
-		$echo = (string) $this->client->sendRequest($request)->getBody();
+		$echo = $this->client->sendRequest($request)->getBody()->getContents();
 
 		$this->assertStringContainsString("\r\nUser-Agent: Custom/1.0\r\n", $echo);
 		$this->assertStringNotContainsString('SempertonProxy', $echo);
@@ -75,7 +75,7 @@ final class ClientTest extends TestCase
 
 	public function testPostWithBody(): void
 	{
-		$echo = (string) $this->send('POST', '/echo', 'Hello World')->getBody();
+		$echo = $this->send('POST', '/echo', 'Hello World')->getBody()->getContents();
 
 		$this->assertStringContainsString("\r\nContent-Length: 11\r\n", $echo);
 		$this->assertStringEndsWith("\r\n\r\nHello World", $echo);
@@ -83,7 +83,7 @@ final class ClientTest extends TestCase
 
 	public function testPostWithEmptyBody(): void
 	{
-		$echo = (string) $this->send('POST', '/echo')->getBody();
+		$echo = $this->send('POST', '/echo')->getBody()->getContents();
 
 		$this->assertStringContainsString("\r\nContent-Length: 0\r\n", $echo);
 	}
@@ -91,7 +91,7 @@ final class ClientTest extends TestCase
 	public function testLargeBodyIsStreamed(): void
 	{
 		$data = str_repeat('0123456789', 100_000);
-		$echo = (string) $this->send('PUT', '/echo', $data)->getBody();
+		$echo = $this->send('PUT', '/echo', $data)->getBody()->getContents();
 
 		$this->assertStringContainsString("\r\nContent-Length: 1000000\r\n", $echo);
 		$this->assertStringEndsWith("\r\n\r\n" . $data, $echo);
@@ -103,7 +103,7 @@ final class ClientTest extends TestCase
 			->createRequest('POST', self::url('/echo'))
 			->withBody($this->createUnknownSizeBody('Hello World'));
 
-		$echo = (string) $this->client->sendRequest($request)->getBody();
+		$echo = $this->client->sendRequest($request)->getBody()->getContents();
 
 		$this->assertStringContainsString("\r\nContent-Length: 11\r\n", $echo);
 		$this->assertStringNotContainsString('Transfer-Encoding', $echo);
@@ -118,7 +118,7 @@ final class ClientTest extends TestCase
 			->withHeader('Content-Length', '5')
 			->withBody($this->createUnknownSizeBody('Hello'));
 
-		$echo = (string) $this->client->sendRequest($request)->getBody();
+		$echo = $this->client->sendRequest($request)->getBody()->getContents();
 
 		$this->assertStringContainsString("\r\nTransfer-Encoding: chunked\r\n", $echo);
 		$this->assertStringNotContainsString('Content-Length', $echo);
@@ -129,7 +129,7 @@ final class ClientTest extends TestCase
 	{
 		$response = $this->send('GET', '/chunked');
 
-		$this->assertSame('Hello, World!', (string) $response->getBody());
+		$this->assertSame('Hello, World!', $response->getBody()->getContents());
 		$this->assertFalse($response->hasHeader('Transfer-Encoding'));
 		$this->assertFalse($response->hasHeader('Content-Length'));
 		$this->assertFalse($response->hasHeader('X-Trailer'));
@@ -139,7 +139,7 @@ final class ClientTest extends TestCase
 	{
 		$response = $this->send('GET', '/chunked-gzip');
 
-		$this->assertSame('abc', (string) $response->getBody());
+		$this->assertSame('abc', $response->getBody()->getContents());
 		$this->assertSame('gzip', $response->getHeaderLine('Transfer-Encoding'));
 	}
 
@@ -147,7 +147,7 @@ final class ClientTest extends TestCase
 	{
 		$response = $this->send('GET', '/gzip-close');
 
-		$this->assertSame('raw', (string) $response->getBody());
+		$this->assertSame('raw', $response->getBody()->getContents());
 		$this->assertSame('gzip', $response->getHeaderLine('Transfer-Encoding'));
 	}
 
@@ -167,7 +167,7 @@ final class ClientTest extends TestCase
 
 		$this->assertSame(200, $response->getStatusCode());
 		$this->assertFalse($response->hasHeader('Link'));
-		$this->assertSame('ok', (string) $response->getBody());
+		$this->assertSame('ok', $response->getBody()->getContents());
 	}
 
 	/**
@@ -186,7 +186,7 @@ final class ClientTest extends TestCase
 		$body = $this->send($method, $path)->getBody();
 
 		$this->assertTrue($body->eof());
-		$this->assertSame('', (string) $body);
+		$this->assertSame('', $body->getContents());
 	}
 
 	public function testContentLength(): void
@@ -194,7 +194,7 @@ final class ClientTest extends TestCase
 		$response = $this->send('GET', '/length');
 
 		$this->assertSame(5, $response->getBody()->getSize());
-		$this->assertSame('Hello', (string) $response->getBody());
+		$this->assertSame('Hello', $response->getBody()->getContents());
 	}
 
 	public function testDuplicateContentLengthIsCollapsed(): void
@@ -202,7 +202,7 @@ final class ClientTest extends TestCase
 		$response = $this->send('GET', '/duplicate-length');
 
 		$this->assertSame('2', $response->getHeaderLine('Content-Length'));
-		$this->assertSame('ok', (string) $response->getBody());
+		$this->assertSame('ok', $response->getBody()->getContents());
 	}
 
 	public function testTruncatedBodyIsIncomplete(): void
@@ -221,7 +221,7 @@ final class ClientTest extends TestCase
 
 		$this->assertSame('1.0', $response->getProtocolVersion());
 		$this->assertNull($response->getBody()->getSize());
-		$this->assertSame('until close', (string) $response->getBody());
+		$this->assertSame('until close', $response->getBody()->getContents());
 	}
 
 	public function testHeaderParsing(): void
@@ -263,7 +263,7 @@ final class ClientTest extends TestCase
 
 	public function testReadTimeout(): void
 	{
-		$client = new Client(new ResponseFactory(), 0.2);
+		$client = new Client(new ResponseFactory(), 0.1);
 
 		$this->expectException(NetworkException::class);
 		$this->expectExceptionMessage('Timed out');
@@ -278,10 +278,13 @@ final class ClientTest extends TestCase
 		$address = (string) stream_socket_get_name($socket, false);
 		fclose($socket);
 
-		$this->expectException(NetworkException::class);
-		$this->expectExceptionMessage('Unable to connect');
-
-		$this->client->sendRequest($this->requestFactory->createRequest('GET', "http://$address/"));
+		try {
+			$this->client->sendRequest($this->requestFactory->createRequest('GET', "http://$address/"));
+			$this->fail('Expected a NetworkException');
+		} catch (NetworkException $e) {
+			$this->assertStringContainsString('Unable to connect', $e->getMessage());
+			$this->assertGreaterThan(0, $e->getCode());
+		}
 	}
 
 	/**
@@ -330,7 +333,7 @@ final class ClientTest extends TestCase
 			$this->fail('Expected a RequestException');
 		} catch (RequestException $e) {
 			$this->assertStringContainsString($message, $e->getMessage());
-			$this->assertSame($request->getMethod(), $e->getRequest()->getMethod());
+			$this->assertSame((string) $request->getUri(), (string) $e->getRequest()->getUri());
 		}
 	}
 
