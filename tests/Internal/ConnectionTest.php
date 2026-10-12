@@ -15,7 +15,9 @@ use function microtime;
 use function str_repeat;
 use function stream_get_contents;
 use function stream_set_timeout;
+use function stream_socket_get_name;
 use function stream_socket_pair;
+use function stream_socket_server;
 use function usleep;
 
 use const STREAM_IPPROTO_IP;
@@ -128,6 +130,26 @@ final class ConnectionTest extends TestCase
 			$this->fail('Expected a RuntimeException');
 		} catch (RuntimeException $e) {
 			$this->assertStringContainsString('maximum duration', $e->getMessage());
+		}
+
+		$this->assertLessThan(1, microtime(true) - $start);
+	}
+
+	public function testMaxDurationCoversTlsHandshake(): void
+	{
+		// connections are queued by the kernel but never accepted, so no TLS reply arrives
+		$server = stream_socket_server('tcp://127.0.0.1:0');
+		$this->assertNotFalse($server);
+		$address = 'tcp://' . stream_socket_get_name($server, false);
+		$start = microtime(true);
+
+		try {
+			Connection::open($address, true, 5, 0.2, []);
+			$this->fail('Expected a RuntimeException');
+		} catch (RuntimeException $e) {
+			$this->assertStringContainsString('maximum duration', $e->getMessage());
+		} finally {
+			fclose($server);
 		}
 
 		$this->assertLessThan(1, microtime(true) - $start);

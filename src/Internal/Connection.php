@@ -18,6 +18,7 @@ use function is_resource;
 use function max;
 use function min;
 use function rtrim;
+use function str_contains;
 use function stream_context_create;
 use function stream_get_meta_data;
 use function stream_set_timeout;
@@ -48,23 +49,20 @@ final class Connection
 
 	private string $buffer = '';
 
-	private readonly ?float $deadline;
-
 	/** Whether the timeout of the current operation is limited by the deadline */
 	private bool $deadlineArmed = false;
 
 	/**
 	 * @param resource $resource
 	 * @param float|null $timeout Idle timeout in seconds, null to keep the stream's timeout
-	 * @param float|null $maxDuration Time in seconds the connection may be used for, null for no limit
+	 * @param float|null $deadline Point in time (see now()) after which the connection may not be used
 	 */
 	private function __construct(
 		$resource,
 		private readonly ?float $timeout,
-		?float $maxDuration,
+		private readonly ?float $deadline,
 	) {
 		$this->resource = $resource;
-		$this->deadline = $maxDuration === null ? null : self::now() + $maxDuration;
 	}
 
 	public function __destruct()
@@ -78,6 +76,8 @@ final class Connection
 	 */
 	public static function open(string $address, bool $tls, float $timeout, ?float $maxDuration, array $contextOptions): self
 	{
+		// the deadline starts before connecting, so name resolution and the TCP handshake count towards it
+		$deadline = self::deadline($maxDuration);
 		$connectTimeout = $maxDuration === null ? $timeout : min($timeout, $maxDuration);
 		$context = stream_context_create($contextOptions);
 		$errorCode = 0;
@@ -89,7 +89,7 @@ final class Connection
 			throw new RuntimeException("Unable to connect to $address: $errorMessage", $errorCode);
 		}
 
-		$connection = new self($resource, $timeout, $maxDuration);
+		$connection = new self($resource, $timeout, $deadline);
 
 		if ($tls) {
 			$connection->enableTls($address, (int) ($contextOptions['ssl']['crypto_method'] ?? STREAM_CRYPTO_METHOD_ANY_CLIENT));
@@ -103,7 +103,7 @@ final class Connection
 	 */
 	public static function wrap($resource, ?float $timeout = null, ?float $maxDuration = null): self
 	{
-		return new self($resource, $timeout, $maxDuration);
+		return new self($resource, $timeout, self::deadline($maxDuration));
 	}
 
 	/**
@@ -243,6 +243,11 @@ final class Connection
 		return (float) hrtime(true) / 1e9;
 	}
 
+	private static function deadline(?float $maxDuration): ?float
+	{
+		return $maxDuration === null ? null : self::now() + $maxDuration;
+	}
+
 	private function enableTls(string $address, int $cryptoMethod): void
 	{
 		$resource = $this->resource();
@@ -250,9 +255,13 @@ final class Connection
 		error_clear_last();
 
 		if (@stream_socket_enable_crypto($resource, true, $cryptoMethod) !== true) {
-			$this->assertNotTimedOut($resource);
-			$this->close();
 			$error = error_get_last()['message'] ?? 'unknown error';
+			$this->close();
+
+			// a handshake timeout is only reported in the error message, not in the stream metadata
+			if (str_contains($error, 'timed out')) {
+				throw $this->timeout();
+			}
 
 			throw new RuntimeException("Unable to establish a TLS connection to $address: $error");
 		}
@@ -307,15 +316,14 @@ final class Connection
 	 */
 	private function assertNotTimedOut($resource): void
 	{
-		if (!(stream_get_meta_data($resource)['timed_out'] ?? false)) {
-			return;
+		if (stream_get_meta_data($resource)['timed_out'] ?? false) {
+			throw $this->timeout();
 		}
+	}
 
-		if ($this->deadlineArmed) {
-			throw new RuntimeException('Request exceeded the maximum duration');
-		}
-
-		throw new RuntimeException('Connection timed out');
+	private function timeout(): RuntimeException
+	{
+		return new RuntimeException($this->deadlineArmed ? 'Request exceeded the maximum duration' : 'Connection timed out');
 	}
 
 	/**
